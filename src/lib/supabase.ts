@@ -1,6 +1,11 @@
-const SUPABASE_URL = 'https://ixruzsfjguseeyvdfjne.supabase.co/rest/v1';
-const SUPABASE_ANON_KEY =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4cnV6c2ZqZ3VzZWV5dmRmam5lIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0MzcwNjIsImV4cCI6MjA5MzAxMzA2Mn0.83ndKVsfs8_vFk_q-Kl4QMpT9iVCHlcQUFyS3IYfW6o';
+const SUPABASE_PROJECT_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+if (!SUPABASE_PROJECT_URL || !SUPABASE_ANON_KEY) {
+  throw new Error('Missing Supabase environment variables');
+}
+
+const SUPABASE_URL = `${SUPABASE_PROJECT_URL.replace(/\/$/, '')}/rest/v1`;
 
 export type StudentAccount = {
   id: string;
