@@ -1,4 +1,10 @@
-const activityItems = [
+type ActivityItem = {
+  title: string;
+  time: string;
+  tag: string;
+};
+
+const activityItems: ActivityItem[] = [
   { title: 'Completed Algebra practice set', time: '09:20 AM', tag: 'Practice' },
   { title: 'Scored 84 on Logical Reasoning quiz', time: 'Yesterday', tag: 'Quiz' },
   { title: 'Reviewed flashcards for Biology', time: '2 days ago', tag: 'Revision' },
@@ -6,7 +12,11 @@ const activityItems = [
   { title: 'Midterm exam analytics synced', time: '1 week ago', tag: 'Exam' }
 ];
 
-function ActivityFeed() {
+type ActivityFeedProps = {
+  items?: ActivityItem[];
+};
+
+function ActivityFeed({ items = activityItems }: ActivityFeedProps) {
   return (
     <section className="feed-panel glass-panel">
       <div className="section-heading">
@@ -17,7 +27,7 @@ function ActivityFeed() {
       </div>
 
       <div className="feed-list">
-        {activityItems.map((item) => (
+        {items.map((item) => (
           <article className="feed-item" key={`${item.title}-${item.time}`}>
             <div className="feed-indicator" />
             <div className="feed-copy">

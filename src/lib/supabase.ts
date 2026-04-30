@@ -23,6 +23,8 @@ export type PracticeQuestionRecord = {
 
 export type PracticeQuizRecord = {
   id: number;
+  topicId?: number;
+  topicTitle?: string;
   itemCount: number;
   sourceText: string;
   questions: PracticeQuestionRecord[];
@@ -41,6 +43,13 @@ export type PracticeWorkspace = {
   quizzes: PracticeQuizRecord[];
   created_at: string;
   updated_at: string;
+};
+
+export type PracticeTopicRecord = {
+  id: number;
+  title: string;
+  quiz_count: number;
+  quizzes: PracticeQuizRecord[];
 };
 
 type RequestOptions = {
@@ -100,6 +109,107 @@ export async function getPracticeWorkspace(studentAccountId: string) {
   );
 
   return rows[0] ?? null;
+}
+
+function normalizeTopicQuiz(quiz: PracticeQuizRecord, topicId: number, topicTitle: string) {
+  return {
+    ...quiz,
+    id: quiz.id,
+    topicId,
+    topicTitle,
+    questions: Array.isArray(quiz.questions)
+      ? quiz.questions.map((question, index) => ({
+          ...question,
+          id: index + 1
+        }))
+      : []
+  };
+}
+
+export function normalizePracticeTopics(
+  workspace: Pick<PracticeWorkspace, 'title' | 'quiz_count' | 'quizzes'> | null
+) {
+  if (!workspace) {
+    return [] as PracticeTopicRecord[];
+  }
+
+  const groupedTopics = new Map<number, PracticeTopicRecord>();
+  const workspaceTitle = workspace.title?.trim() || 'Weekly Mastery Check';
+  const workspaceQuizzes = Array.isArray(workspace.quizzes) ? workspace.quizzes : [];
+
+  if (!workspaceQuizzes.length) {
+    if ((workspace.quiz_count ?? 0) <= 0) {
+      return [] as PracticeTopicRecord[];
+    }
+
+    return [
+      {
+        id: 1,
+        title: workspaceTitle,
+        quiz_count: Math.max(workspace.quiz_count ?? 0, 0),
+        quizzes: []
+      }
+    ];
+  }
+
+  workspaceQuizzes.forEach((quiz) => {
+    const topicId = typeof quiz.topicId === 'number' && quiz.topicId > 0 ? quiz.topicId : 1;
+    const topicTitle = quiz.topicTitle?.trim() || workspaceTitle;
+    const existingTopic = groupedTopics.get(topicId);
+
+    if (!existingTopic) {
+      groupedTopics.set(topicId, {
+        id: topicId,
+        title: topicTitle,
+        quiz_count: 0,
+        quizzes: [normalizeTopicQuiz(quiz, topicId, topicTitle)]
+      });
+      return;
+    }
+
+    existingTopic.quizzes.push(normalizeTopicQuiz(quiz, topicId, topicTitle));
+  });
+
+  return Array.from(groupedTopics.values())
+    .sort((left, right) => left.id - right.id)
+    .map((topic, topicIndex) => {
+      const nextTopicId = topicIndex + 1;
+      const nextTitle = topic.title?.trim() || `Practice Topic ${nextTopicId}`;
+
+      return {
+        id: nextTopicId,
+        title: nextTitle,
+        quiz_count: topic.quizzes.length,
+        quizzes: topic.quizzes.map((quiz, quizIndex) => ({
+          ...quiz,
+          id: quizIndex + 1,
+          topicId: nextTopicId,
+          topicTitle: nextTitle
+        }))
+      };
+    });
+}
+
+export function flattenPracticeTopics(
+  topics: Array<Pick<PracticeTopicRecord, 'id' | 'title' | 'quizzes'>>
+) {
+  return topics.flatMap((topic, topicIndex) => {
+    const nextTopicId = topicIndex + 1;
+    const nextTopicTitle = topic.title?.trim() || `Practice Topic ${nextTopicId}`;
+
+    return topic.quizzes.map((quiz, quizIndex) => ({
+      ...quiz,
+      id: quizIndex + 1,
+      topicId: nextTopicId,
+      topicTitle: nextTopicTitle,
+      questions: Array.isArray(quiz.questions)
+        ? quiz.questions.map((question, questionIndex) => ({
+            ...question,
+            id: questionIndex + 1
+          }))
+        : []
+    }));
+  });
 }
 
 export async function upsertPracticeWorkspace(input: {

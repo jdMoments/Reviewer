@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import Loader from '../components/Loader';
 import { useAuth } from '../context/AuthContext';
-import { getPracticeWorkspace, type PracticeQuizRecord, type PracticeWorkspace } from '../lib/supabase';
+import {
+  getPracticeWorkspace,
+  normalizePracticeTopics,
+  type PracticeQuizRecord,
+  type PracticeWorkspace
+} from '../lib/supabase';
 
 type QuizAnalytics = {
   id: number;
   attempts: number;
+  key: string;
   label: string;
   passed: boolean;
   practiceCompletion: number;
@@ -23,7 +29,7 @@ function clampPercent(value: number) {
   return Math.max(0, Math.min(100, Math.round(value)));
 }
 
-function buildQuizAnalytics(quiz: PracticeQuizRecord, topic: string): QuizAnalytics {
+function buildQuizAnalytics(quiz: PracticeQuizRecord, topic: string, topicId: number): QuizAnalytics {
   const totalQuestions = Math.max(quiz.itemCount, quiz.questions.length, 1);
   const preparedQuestions = quiz.questions.filter(
     (question) =>
@@ -37,6 +43,7 @@ function buildQuizAnalytics(quiz: PracticeQuizRecord, topic: string): QuizAnalyt
   return {
     id: quiz.id,
     attempts: quiz.attempts,
+    key: `${topicId}-${quiz.id}`,
     label: `${topic} ${quiz.id}`,
     passed: quiz.attempts > 0 && quiz.lastAccuracy >= 75,
     practiceCompletion,
@@ -118,13 +125,16 @@ function Analysis() {
     };
   }, [isAuthenticated, user.id]);
 
+  const practiceTopics = useMemo(() => normalizePracticeTopics(workspace), [workspace]);
   const analytics = useMemo(() => {
     if (!workspace) {
       return [];
     }
 
-    return workspace.quizzes.map((quiz) => buildQuizAnalytics(quiz, workspace.title));
-  }, [workspace]);
+    return practiceTopics.flatMap((topic) =>
+      topic.quizzes.map((quiz) => buildQuizAnalytics(quiz, topic.title, topic.id))
+    );
+  }, [practiceTopics, workspace]);
 
   const summary = useMemo(() => {
     if (!analytics.length) {
@@ -284,7 +294,7 @@ function Analysis() {
 
             <div className="analysis-diff-list">
               {analytics.map((quiz) => (
-                <div className="analysis-diff-row" key={quiz.id}>
+                <div className="analysis-diff-row" key={quiz.key}>
                   <div className="analysis-diff-copy">
                     <span>{quiz.label}</span>
                     <small>
@@ -314,7 +324,7 @@ function Analysis() {
               </div>
               <div className="bar-chart">
                 {analytics.map((quiz) => (
-                  <div className="analysis-bar-group" key={`bar-${quiz.id}`}>
+                  <div className="analysis-bar-group" key={`bar-${quiz.key}`}>
                     <div className="bar-label-row">
                       <span>{quiz.label}</span>
                       <strong>{quiz.scoreLabel}</strong>
@@ -354,7 +364,7 @@ function Analysis() {
                   const quizY = 240 - 28 - ((quiz.quizAccuracy / 100) * (240 - 56));
 
                   return (
-                    <g key={`line-point-${quiz.id}`}>
+                    <g key={`line-point-${quiz.key}`}>
                       <circle className="analysis-line-point practice" cx={x} cy={practiceY} r="5" />
                       <circle className="analysis-line-point quiz" cx={x} cy={quizY} r="5" />
                     </g>
@@ -413,7 +423,7 @@ function Analysis() {
                   const x = 48 + (quiz.practiceCompletion / 100) * 272;
                   const y = 220 - (quiz.quizAccuracy / 100) * 196;
                   return (
-                    <g key={`scatter-${quiz.id}`}>
+                    <g key={`scatter-${quiz.key}`}>
                       <circle
                         className={`analysis-scatter-dot ${quiz.passed ? 'pass' : 'fail'}`}
                         cx={x}
@@ -444,7 +454,7 @@ function Analysis() {
                 {networkNodes.map((node) => (
                   <line
                     className="analysis-network-edge"
-                    key={`edge-${node.id}`}
+                    key={`edge-${node.key}`}
                     x1="210"
                     x2={node.x}
                     y1="190"
@@ -453,13 +463,13 @@ function Analysis() {
                 ))}
                 <circle className="analysis-network-center" cx="210" cy="190" r="58" />
                 <text className="analysis-network-center-label" x="210" y="186">
-                  {workspace.title}
+                  {practiceTopics.length > 1 ? 'Practice Topics' : practiceTopics[0]?.title ?? workspace.title}
                 </text>
                 <text className="analysis-network-center-sub" x="210" y="208">
-                  Practice + Quiz Hub
+                  {practiceTopics.length} topic{practiceTopics.length === 1 ? '' : 's'} linked
                 </text>
                 {networkNodes.map((node) => (
-                  <g key={`node-${node.id}`}>
+                  <g key={`node-${node.key}`}>
                     <circle
                       className={`analysis-network-node ${node.passed ? 'pass' : 'default'}`}
                       cx={node.x}

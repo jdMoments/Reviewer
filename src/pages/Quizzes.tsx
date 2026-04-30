@@ -2,10 +2,13 @@ import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from
 import Modal from '../components/Modal';
 import { useAuth } from '../context/AuthContext';
 import {
+  flattenPracticeTopics,
   getPracticeWorkspace,
+  normalizePracticeTopics,
   upsertPracticeWorkspace,
   type PracticeQuestionRecord,
   type PracticeQuizRecord,
+  type PracticeTopicRecord,
   type PracticeWorkspace
 } from '../lib/supabase';
 
@@ -108,7 +111,7 @@ function getCorrectChoiceLabel(answer: string, choices: ParsedChoice[]) {
   return exactChoice?.label ?? answer.trim();
 }
 
-function buildSessionQuestions(quizzes: PracticeQuizRecord[], topic: string) {
+function buildSessionQuestions(quizzes: PracticeQuizRecord[], topic: PracticeTopicRecord) {
   let questionNumber = 1;
 
   return quizzes.flatMap((quiz) =>
@@ -117,8 +120,8 @@ function buildSessionQuestions(quizzes: PracticeQuizRecord[], topic: string) {
         ...question,
         globalIndex: questionNumber,
         quizId: quiz.id,
-        quizLabel: `${topic} ${quiz.id}`,
-        sessionKey: `${quiz.id}-${index + 1}`
+        quizLabel: `${topic.title} ${quiz.id}`,
+        sessionKey: `${topic.id}-${quiz.id}-${index + 1}`
       };
 
       questionNumber += 1;
@@ -144,7 +147,7 @@ function Quizzes() {
   const [workspace, setWorkspace] = useState<PracticeWorkspace | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [status, setStatus] = useState('Select a Practice topic to begin building a quiz set.');
-  const [selectedTopic, setSelectedTopic] = useState('');
+  const [selectedTopicId, setSelectedTopicId] = useState('');
   const [selectedQuizCount, setSelectedQuizCount] = useState('1');
   const [selectedQuizIds, setSelectedQuizIds] = useState<number[]>([]);
   const [submittedQuizIds, setSubmittedQuizIds] = useState<number[]>([]);
@@ -178,9 +181,14 @@ function Quizzes() {
         setWorkspace(nextWorkspace);
 
         if (nextWorkspace) {
-          const readyQuizzes = nextWorkspace.quizzes.filter(isQuizReady);
+          const practiceTopics = normalizePracticeTopics(nextWorkspace);
+          const defaultTopic =
+            practiceTopics.find((topic) => topic.quizzes.some(isQuizReady)) ??
+            practiceTopics[0] ??
+            null;
+          const readyQuizzes = defaultTopic?.quizzes.filter(isQuizReady) ?? [];
 
-          setSelectedTopic(nextWorkspace.title);
+          setSelectedTopicId(defaultTopic ? String(defaultTopic.id) : '');
           setSelectedQuizCount(String(Math.max(1, Math.min(readyQuizzes.length || 1, 1))));
           setQuizResults([]);
           setStatus(
@@ -209,9 +217,18 @@ function Quizzes() {
     };
   }, [isAuthenticated, user.id]);
 
+  const practiceTopics = useMemo(() => normalizePracticeTopics(workspace), [workspace]);
+  const selectedTopicRecord = useMemo(
+    () =>
+      practiceTopics.find((topic) => String(topic.id) === selectedTopicId) ??
+      practiceTopics[0] ??
+      null,
+    [practiceTopics, selectedTopicId]
+  );
+  const selectedTopic = selectedTopicRecord?.title ?? '';
   const availableQuizzes = useMemo(
-    () => workspace?.quizzes.filter(isQuizReady) ?? [],
-    [workspace]
+    () => selectedTopicRecord?.quizzes.filter(isQuizReady) ?? [],
+    [selectedTopicRecord]
   );
   const targetCount = Number(selectedQuizCount);
   const selectedQuizMap = useMemo(
@@ -226,8 +243,8 @@ function Quizzes() {
     [activeQuizIds, selectedQuizMap]
   );
   const sessionQuestions = useMemo(
-    () => buildSessionQuestions(activeSessionQuizzes, selectedTopic || 'Quiz'),
-    [activeSessionQuizzes, selectedTopic]
+    () => (selectedTopicRecord ? buildSessionQuestions(activeSessionQuizzes, selectedTopicRecord) : []),
+    [activeSessionQuizzes, selectedTopicRecord]
   );
   const questionPageCount = Math.max(1, Math.ceil(sessionQuestions.length / QUIZ_PAGE_SIZE));
   const visibleQuestions = sessionQuestions.slice(
@@ -329,7 +346,7 @@ function Quizzes() {
       const total = questions.length;
       const accuracy = total ? Math.round((score / total) * 100) : 0;
       const previousAttempt =
-        workspace?.quizzes.find((entry) => entry.id === quiz.id)?.attempts ??
+        selectedTopicRecord?.quizzes.find((entry) => entry.id === quiz.id)?.attempts ??
         quizResults.find((result) => result.quizId === quiz.id)?.attempt ??
         0;
 
@@ -349,34 +366,48 @@ function Quizzes() {
     });
 
     if (workspace) {
-      const nextWorkspaceQuizzes = workspace.quizzes.map((quiz) => {
-        const matchingResult = nextResults.find((result) => result.quizId === quiz.id);
-
-        if (!matchingResult) {
-          return quiz;
+      const nextPracticeTopics = normalizePracticeTopics(workspace).map((topic) => {
+        if (topic.id !== selectedTopicRecord?.id) {
+          return topic;
         }
 
         return {
-          ...quiz,
-          attempts: matchingResult.attempt,
-          lastAccuracy: matchingResult.accuracy,
-          lastAnalysis: buildPerformanceAnalysis(
-            matchingResult.accuracy,
-            matchingResult.score,
-            matchingResult.total
-          ),
-          lastResponses: Object.fromEntries(
-            matchingResult.questions.map((question) => [
-              question.id,
-              matchingResult.responses[question.sessionKey] ?? ''
-            ])
-          ),
-          lastScore: matchingResult.score
+          ...topic,
+          quiz_count: topic.quizzes.length,
+          quizzes: topic.quizzes.map((quiz) => {
+            const matchingResult = nextResults.find((result) => result.quizId === quiz.id);
+
+            if (!matchingResult) {
+              return quiz;
+            }
+
+            return {
+              ...quiz,
+              attempts: matchingResult.attempt,
+              lastAccuracy: matchingResult.accuracy,
+              lastAnalysis: buildPerformanceAnalysis(
+                matchingResult.accuracy,
+                matchingResult.score,
+                matchingResult.total
+              ),
+              lastResponses: Object.fromEntries(
+                matchingResult.questions.map((question) => [
+                  question.id,
+                  matchingResult.responses[question.sessionKey] ?? ''
+                ])
+              ),
+              lastScore: matchingResult.score
+            };
+          })
         };
       });
+      const nextWorkspaceQuizzes = flattenPracticeTopics(nextPracticeTopics);
+      const primaryTopic = nextPracticeTopics[0];
 
       const nextWorkspace = {
         ...workspace,
+        title: primaryTopic?.title ?? workspace.title,
+        quiz_count: primaryTopic?.quizzes.length ?? workspace.quiz_count,
         quizzes: nextWorkspaceQuizzes
       };
 
@@ -445,16 +476,22 @@ function Quizzes() {
                   <span>Topic from Practices</span>
                   <select
                     className="practice-select"
-                    disabled={!workspace}
+                    disabled={!practiceTopics.length}
                     onChange={(event) => {
-                      setSelectedTopic(event.target.value);
+                      setSelectedTopicId(event.target.value);
+                      setSelectedQuizCount('1');
                       setSelectedQuizIds([]);
                       setSubmittedQuizIds([]);
+                      setQuizResults([]);
                     }}
-                    value={selectedTopic}
+                    value={selectedTopicId}
                   >
-                    {workspace ? (
-                      <option value={workspace.title}>{workspace.title}</option>
+                    {practiceTopics.length ? (
+                      practiceTopics.map((topic) => (
+                        <option key={topic.id} value={topic.id}>
+                          {topic.title}
+                        </option>
+                      ))
                     ) : (
                       <option value="">No topic available</option>
                     )}

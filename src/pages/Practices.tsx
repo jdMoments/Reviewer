@@ -9,7 +9,12 @@ import {
 } from 'react';
 import Modal from '../components/Modal';
 import { useAuth } from '../context/AuthContext';
-import { getPracticeWorkspace, upsertPracticeWorkspace } from '../lib/supabase';
+import {
+  flattenPracticeTopics,
+  getPracticeWorkspace,
+  normalizePracticeTopics,
+  upsertPracticeWorkspace
+} from '../lib/supabase';
 import { extractTextFromQuestionFile } from '../utils/fileTextExtraction';
 
 type QuestionEntry = {
@@ -30,6 +35,12 @@ type QuizInstance = {
   lastResponses: Record<number, string>;
 };
 
+type PracticeTopic = {
+  id: number;
+  title: string;
+  quizzes: QuizInstance[];
+};
+
 type ParsedChoice = {
   label: string;
   text: string;
@@ -46,6 +57,27 @@ type QuizResultSummary = {
 type AnswerAssistMode = 'manual' | 'ai';
 type AnswerAssistStep = 'select' | 'reminder';
 type AnswerAssistTrigger = 'scan' | 'save';
+type PendingScanSelection = {
+  questions: QuestionEntry[];
+  totalDetected: number;
+};
+type AppliedScanRange = {
+  start: number;
+  end: number;
+  total: number;
+};
+type ScanRangeModalMode = 'initial' | 'edit';
+type QuizEditorDraft = {
+  itemCount: number;
+  sourceText: string;
+  questions: QuestionEntry[];
+  editorMode: 'text' | 'file';
+  loadedFileName: string;
+  isSourceScanned: boolean;
+  isScanManualLocked: boolean;
+  appliedScanRange: AppliedScanRange | null;
+  scanMessage: string;
+};
 
 function createDefaultQuestions(count: number) {
   return Array.from({ length: count }, (_, index) => ({
@@ -79,22 +111,66 @@ function createQuizInstances(
   });
 }
 
+function createPracticeTopic(
+  topicId: number,
+  title = 'Weekly Mastery Check',
+  quizCount = 5,
+  previous: Array<Partial<QuizInstance>> = []
+) {
+  return {
+    id: topicId,
+    title,
+    quizzes: createQuizInstances(quizCount, previous)
+  };
+}
+
+function normalizePracticeTopicState(topics: PracticeTopic[]) {
+  return topics.map((topic, topicIndex) => {
+    const nextTopicId = topicIndex + 1;
+    const nextTitle = topic.title.trim() || `Practice Topic ${nextTopicId}`;
+    const nextQuizzes =
+      topic.quizzes.length > 0
+        ? topic.quizzes.map((quiz, quizIndex) => ({
+            ...quiz,
+            id: quizIndex + 1,
+            questions: quiz.questions.length
+              ? quiz.questions.map((question, questionIndex) => ({
+                  ...question,
+                  id: questionIndex + 1
+                }))
+              : createDefaultQuestions(quiz.itemCount)
+          }))
+        : createQuizInstances(1);
+
+    return {
+      id: nextTopicId,
+      title: nextTitle,
+      quizzes: nextQuizzes
+    };
+  });
+}
+
 function normalizeQuestionBlocks(text: string) {
+  const normalizedText = text
+    .replace(/\r\n?/g, '\n')
+    .replace(/\f/g, '\n')
+    .replace(/([^\n])(?:\s{2,}|\t+)(\d+\.\s)/g, '$1\n$2');
+
   const numberedBlocks = Array.from(
-    text.matchAll(/(?:^|\n)\s*(\d+)\.\s*([\s\S]*?)(?=\n\s*\d+\.\s|\s*$)/g)
+    normalizedText.matchAll(/(?:^|\n)\s*(\d+)\.\s*([\s\S]*?)(?=\n\s*\d+\.\s|\s*$)/g)
   ).map((match) => `${match[1]}. ${match[2].trim()}`.trim());
 
   if (numberedBlocks.length) {
     return numberedBlocks;
   }
 
-  return text
+  return normalizedText
     .split(/\n\s*\n/)
     .map((block) => block.trim())
     .filter(Boolean);
 }
 
-function createQuestionsFromSource(text: string, limit: number) {
+function createQuestionsFromSource(text: string) {
   const lines = text.split(/\r?\n/);
   const answersHeaderIndex = lines.findIndex((line) => /^answers\s*:?$/i.test(line.trim()));
   const answerMap = new Map<number, string>();
@@ -129,7 +205,7 @@ function createQuestionsFromSource(text: string, limit: number) {
 
   return {
     totalDetected: questionBlocks.length,
-    questions: questionBlocks.slice(0, limit).map((block, index) => {
+    questions: questionBlocks.map((block, index) => {
       const lines = block
         .split(/\r?\n/)
         .map((line) => line.trimEnd());
@@ -274,6 +350,22 @@ function buildPerformanceAnalysis(accuracy: number, score: number, total: number
   return `This attempt shows the topic still needs reinforcement. You answered ${score} out of ${total} correctly, so a guided review before the next retake would be the best next step.`;
 }
 
+function getAccuracyToneClass(accuracy: number) {
+  if (accuracy >= 91) {
+    return 'practice-accuracy-top';
+  }
+
+  if (accuracy >= 81) {
+    return 'practice-accuracy-high';
+  }
+
+  if (accuracy >= 75) {
+    return 'practice-accuracy-mid';
+  }
+
+  return 'practice-accuracy-low';
+}
+
 function inferAnswerForQuestion(question: QuestionEntry) {
   const parsed = parsePromptChoices(question.prompt, question.answer);
   const mathMatch = parsed.stem.match(/(-?\d+(?:\.\d+)?)\s*([+\-x×*\/÷])\s*(-?\d+(?:\.\d+)?)/i);
@@ -322,22 +414,27 @@ function inferAnswerForQuestion(question: QuestionEntry) {
 }
 
 function Practices() {
+  const TOPICS_PER_PAGE = 5;
+  const MAX_TOPIC_PAGE_INPUT = 5;
   const { isAuthenticated, user } = useAuth();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [showQuizModal, setShowQuizModal] = useState(false);
+  const [topicModalMode, setTopicModalMode] = useState<'create' | 'edit'>('create');
   const [showQuestionCountModal, setShowQuestionCountModal] = useState(false);
   const [showItemsModal, setShowItemsModal] = useState(false);
   const [showPlayModal, setShowPlayModal] = useState(false);
+  const [showQuizOverviewModal, setShowQuizOverviewModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [showDeleteTopicModal, setShowDeleteTopicModal] = useState(false);
   const [showAnswerAssistModal, setShowAnswerAssistModal] = useState(false);
-  const [showQuizCollection, setShowQuizCollection] = useState(false);
+  const [showScanRangeModal, setShowScanRangeModal] = useState(false);
+  const [practiceTopics, setPracticeTopics] = useState<PracticeTopic[]>(() => [
+    createPracticeTopic(1)
+  ]);
+  const [selectedTopicId, setSelectedTopicId] = useState(1);
+  const [expandedTopicId, setExpandedTopicId] = useState<number | null>(1);
   const [quizTitle, setQuizTitle] = useState('Weekly Mastery Check');
   const [quizCount, setQuizCount] = useState('5');
-  const [savedTitle, setSavedTitle] = useState('Weekly Mastery Check');
-  const [savedCount, setSavedCount] = useState('5');
-  const [quizInstances, setQuizInstances] = useState<QuizInstance[]>(() =>
-    createQuizInstances(5)
-  );
   const [selectedQuizId, setSelectedQuizId] = useState(1);
   const [selectedItemCount, setSelectedItemCount] = useState('10');
   const [editorSourceText, setEditorSourceText] = useState('');
@@ -351,9 +448,16 @@ function Practices() {
   const [invalidAnswerQuestionIds, setInvalidAnswerQuestionIds] = useState<number[]>([]);
   const [isPracticeLoading, setIsPracticeLoading] = useState(false);
   const [practiceStatus, setPracticeStatus] = useState('');
+  const [openTopicMenuId, setOpenTopicMenuId] = useState<number | null>(null);
   const [openQuizMenuId, setOpenQuizMenuId] = useState<number | null>(null);
+  const [pendingDeleteTopicId, setPendingDeleteTopicId] = useState<number | null>(null);
   const [pendingDeleteQuizId, setPendingDeleteQuizId] = useState<number | null>(null);
+  const [quizDrafts, setQuizDrafts] = useState<Record<string, QuizEditorDraft>>({});
   const [pendingSaveQuestions, setPendingSaveQuestions] = useState<QuestionEntry[] | null>(null);
+  const [pendingScanSelection, setPendingScanSelection] = useState<PendingScanSelection | null>(null);
+  const [scanStartQuestion, setScanStartQuestion] = useState('1');
+  const [appliedScanRange, setAppliedScanRange] = useState<AppliedScanRange | null>(null);
+  const [scanRangeModalMode, setScanRangeModalMode] = useState<ScanRangeModalMode>('initial');
   const [answerAssistMode, setAnswerAssistMode] = useState<AnswerAssistMode>('manual');
   const [answerAssistStep, setAnswerAssistStep] = useState<AnswerAssistStep>('select');
   const [answerAssistTrigger, setAnswerAssistTrigger] = useState<AnswerAssistTrigger>('save');
@@ -364,7 +468,19 @@ function Practices() {
   const [playCompleted, setPlayCompleted] = useState(false);
   const [playResult, setPlayResult] = useState<QuizResultSummary | null>(null);
   const [showResultReview, setShowResultReview] = useState(false);
+  const [topicPage, setTopicPage] = useState(0);
+  const [topicPageInput, setTopicPageInput] = useState('1');
 
+  const selectedTopic = useMemo(
+    () => practiceTopics.find((topic) => topic.id === selectedTopicId) ?? null,
+    [practiceTopics, selectedTopicId]
+  );
+  const expandedTopic = useMemo(
+    () => practiceTopics.find((topic) => topic.id === expandedTopicId) ?? null,
+    [expandedTopicId, practiceTopics]
+  );
+  const quizInstances = selectedTopic?.quizzes ?? [];
+  const savedTitle = selectedTopic?.title ?? 'Weekly Mastery Check';
   const selectedQuiz = useMemo(
     () => quizInstances.find((quiz) => quiz.id === selectedQuizId) ?? null,
     [quizInstances, selectedQuizId]
@@ -382,6 +498,19 @@ function Practices() {
   const pendingMissingAnswerCount = answerAssistQuestions.filter(
     (question) => !question.answer.trim()
   ).length;
+  const scanRangeLimit = Number(selectedItemCount);
+  const maxScanStartQuestion = pendingScanSelection
+    ? Math.max(pendingScanSelection.totalDetected - scanRangeLimit + 1, 1)
+    : 1;
+  const previewScanEndQuestion = Math.min(
+    Number(scanStartQuestion || '1') + scanRangeLimit - 1,
+    pendingScanSelection?.totalDetected ?? scanRangeLimit
+  );
+  const totalTopicPages = Math.max(Math.ceil(practiceTopics.length / TOPICS_PER_PAGE), 1);
+  const visiblePracticeTopics = practiceTopics.slice(
+    topicPage * TOPICS_PER_PAGE,
+    topicPage * TOPICS_PER_PAGE + TOPICS_PER_PAGE
+  );
 
   useEffect(() => {
     if (!invalidAnswerQuestionIds.length) {
@@ -389,16 +518,80 @@ function Practices() {
     }
   }, [invalidAnswerQuestionIds]);
 
-  function applyPracticeWorkspace(nextTitle: string, nextQuizzes: QuizInstance[]) {
-    setSavedTitle(nextTitle);
-    setSavedCount(String(nextQuizzes.length));
-    setQuizTitle(nextTitle);
-    setQuizCount(String(Math.max(nextQuizzes.length, 1)));
-    setQuizInstances(nextQuizzes);
+  useEffect(() => {
+    setTopicPage((current) => Math.min(current, Math.max(totalTopicPages - 1, 0)));
+  }, [totalTopicPages]);
+
+  useEffect(() => {
+    setTopicPageInput(String(topicPage + 1));
+  }, [topicPage]);
+
+  function commitTopicPage(nextValue: string) {
+    const parsedValue = Number(nextValue);
+
+    if (!Number.isFinite(parsedValue)) {
+      setTopicPageInput(String(topicPage + 1));
+      return;
+    }
+
+    const clampedPage = Math.min(
+      Math.max(Math.trunc(parsedValue), 1),
+      Math.min(totalTopicPages, MAX_TOPIC_PAGE_INPUT)
+    );
+    setTopicPage(clampedPage - 1);
+    setTopicPageInput(String(clampedPage));
   }
 
-  async function persistPracticeWorkspace(nextTitle: string, nextQuizzes: QuizInstance[]) {
-    applyPracticeWorkspace(nextTitle, nextQuizzes);
+  function getDraftKey(topicId: number, quizId: number) {
+    return `${topicId}-${quizId}`;
+  }
+
+  function applyPracticeTopics(
+    nextTopics: PracticeTopic[],
+    nextSelectedTopicId = selectedTopicId,
+    nextExpandedTopicId = expandedTopicId
+  ) {
+    const normalizedTopics = normalizePracticeTopicState(nextTopics);
+    const fallbackTopic = createPracticeTopic(1);
+
+    if (!normalizedTopics.length) {
+      setPracticeTopics([]);
+      setSelectedTopicId(nextSelectedTopicId);
+      setExpandedTopicId(null);
+      setQuizTitle('');
+      setQuizCount('1');
+      setSelectedQuizId(1);
+      return;
+    }
+
+    const resolvedSelectedTopic =
+      normalizedTopics.find((topic) => topic.id === nextSelectedTopicId) ?? fallbackTopic;
+    const resolvedExpandedTopic =
+      nextExpandedTopicId === null
+        ? null
+        : normalizedTopics.find((topic) => topic.id === nextExpandedTopicId)?.id ??
+          resolvedSelectedTopic.id;
+
+    setPracticeTopics(normalizedTopics);
+    setSelectedTopicId(resolvedSelectedTopic.id);
+    setExpandedTopicId(resolvedExpandedTopic);
+    setQuizTitle(resolvedSelectedTopic.title);
+    setQuizCount(String(Math.max(resolvedSelectedTopic.quizzes.length, 1)));
+    setSelectedQuizId((current) =>
+      Math.min(Math.max(current, 1), Math.max(resolvedSelectedTopic.quizzes.length, 1))
+    );
+  }
+
+  async function persistPracticeTopics(
+    nextTopics: PracticeTopic[],
+    nextSelectedTopicId = selectedTopicId,
+    nextExpandedTopicId = expandedTopicId
+  ) {
+    const normalizedTopics = normalizePracticeTopicState(nextTopics);
+    const fallbackTopic = normalizedTopics[0] ?? createPracticeTopic(1);
+    const flattenedQuizzes = flattenPracticeTopics(normalizedTopics);
+
+    applyPracticeTopics(normalizedTopics, nextSelectedTopicId, nextExpandedTopicId);
 
     if (!user.id) {
       return;
@@ -409,9 +602,9 @@ function Practices() {
     try {
       await upsertPracticeWorkspace({
         studentAccountId: user.id,
-        title: nextTitle,
-        quizCount: nextQuizzes.length,
-        quizzes: nextQuizzes
+        title: fallbackTopic.title,
+        quizCount: fallbackTopic.quizzes.length,
+        quizzes: flattenedQuizzes
       });
       setPracticeStatus('Practice synced to Supabase.');
     } catch {
@@ -438,23 +631,27 @@ function Practices() {
         }
 
         if (workspace) {
-          const nextTitle = workspace.title || 'Weekly Mastery Check';
-          const nextQuizzes = createQuizInstances(
-            workspace.quiz_count ?? 0,
-            Array.isArray(workspace.quizzes) ? workspace.quizzes : []
+          const nextTopics = normalizePracticeTopics(workspace).map((topic) =>
+            createPracticeTopic(
+              topic.id,
+              topic.title,
+              Math.max(topic.quizzes.length, topic.quiz_count, 1),
+              topic.quizzes
+            )
           );
-          applyPracticeWorkspace(nextTitle, nextQuizzes);
+
+          applyPracticeTopics(nextTopics, nextTopics[0]?.id ?? 1, nextTopics[0]?.id ?? 1);
           setPracticeStatus('Practice loaded from Supabase.');
           return;
         }
 
-        const defaultQuizzes = createQuizInstances(5);
-        applyPracticeWorkspace('Weekly Mastery Check', defaultQuizzes);
+        const defaultTopics = [createPracticeTopic(1)];
+        applyPracticeTopics(defaultTopics, 1, 1);
         await upsertPracticeWorkspace({
           studentAccountId: user.id,
           title: 'Weekly Mastery Check',
-          quizCount: defaultQuizzes.length,
-          quizzes: defaultQuizzes
+          quizCount: defaultTopics[0].quizzes.length,
+          quizzes: flattenPracticeTopics(defaultTopics)
         });
         setPracticeStatus('Practice workspace created in Supabase.');
       } catch {
@@ -479,18 +676,104 @@ function Practices() {
     event.preventDefault();
     const nextCount = Number(quizCount);
     const nextTitle = quizTitle.trim() || 'Untitled Quiz';
-    const nextQuizzes = createQuizInstances(nextCount, quizInstances);
-    void persistPracticeWorkspace(nextTitle, nextQuizzes);
+    const nextTopics =
+      topicModalMode === 'create'
+        ? [
+            ...practiceTopics,
+            createPracticeTopic(practiceTopics.length + 1, nextTitle, nextCount)
+          ]
+        : practiceTopics.map((topic) =>
+            topic.id === selectedTopicId
+              ? {
+                  ...topic,
+                  title: nextTitle,
+                  quizzes: createQuizInstances(nextCount, topic.quizzes)
+                }
+              : topic
+          );
+    const nextTopicId =
+      topicModalMode === 'create' ? nextTopics.length : selectedTopicId;
+
+    if (topicModalMode === 'create') {
+      setTopicPage(Math.floor((nextTopics.length - 1) / TOPICS_PER_PAGE));
+    }
+
+    void persistPracticeTopics(nextTopics, nextTopicId, nextTopicId);
     setShowQuizModal(false);
   }
 
-  function handleOpenQuizCollection() {
-    setShowQuizCollection((current) => !current);
+  function handleOpenTopicModal(mode: 'create' | 'edit', topicId = selectedTopicId) {
+    const topic = practiceTopics.find((entry) => entry.id === topicId) ?? null;
+
+    setTopicModalMode(mode);
+    setSelectedTopicId(topic?.id ?? topicId);
+    setQuizTitle(mode === 'create' ? '' : topic?.title ?? '');
+    setQuizCount(mode === 'create' ? '1' : String(topic?.quizzes.length ?? 1));
+    setOpenTopicMenuId(null);
+    setShowQuizModal(true);
+  }
+
+  function handleOpenQuizCollection(topicId: number) {
+    setSelectedTopicId(topicId);
+    setExpandedTopicId((current) => (current === topicId ? null : topicId));
+    setOpenTopicMenuId(null);
+    setOpenQuizMenuId(null);
+  }
+
+  function buildQuizDraft(overrides: Partial<QuizEditorDraft> = {}): QuizEditorDraft {
+    return {
+      itemCount: Number(selectedItemCount),
+      sourceText: editorSourceText,
+      questions: editorQuestions,
+      editorMode,
+      loadedFileName,
+      isSourceScanned,
+      isScanManualLocked,
+      appliedScanRange,
+      scanMessage,
+      ...overrides
+    };
+  }
+
+  function saveQuizDraft(quizId: number, overrides: Partial<QuizEditorDraft> = {}) {
+    const draftKey = getDraftKey(selectedTopicId, quizId);
+
+    setQuizDrafts((current) => ({
+      ...current,
+      [draftKey]: buildQuizDraft(overrides)
+    }));
+  }
+
+  function clearQuizDraft(quizId: number) {
+    const draftKey = getDraftKey(selectedTopicId, quizId);
+
+    setQuizDrafts((current) => {
+      if (!(draftKey in current)) {
+        return current;
+      }
+
+      const nextDrafts = { ...current };
+      delete nextDrafts[draftKey];
+      return nextDrafts;
+    });
+  }
+
+  function buildNextTopicsForSelectedTopic(nextTitle: string, nextQuizzes: QuizInstance[]) {
+    return practiceTopics.map((topic) =>
+      topic.id === selectedTopicId
+        ? {
+            ...topic,
+            title: nextTitle,
+            quizzes: nextQuizzes
+          }
+        : topic
+    );
   }
 
   function openQuizCountStep(quizId: number) {
     const quiz = quizInstances.find((entry) => entry.id === quizId);
-    const currentCount = String(quiz?.itemCount ?? 10);
+    const draft = quizDrafts[getDraftKey(selectedTopicId, quizId)];
+    const currentCount = String(draft?.itemCount ?? quiz?.itemCount ?? 10);
 
     setSelectedQuizId(quizId);
     setSelectedItemCount(currentCount);
@@ -500,30 +783,26 @@ function Practices() {
 
   function launchQuizEditor(quizId: number, questionCount: number) {
     const quiz = quizInstances.find((entry) => entry.id === quizId);
-    const nextDraftQuestions = buildQuestionDrafts(questionCount, [], quiz?.questions ?? []);
+    const draft = quizDrafts[getDraftKey(selectedTopicId, quizId)];
+    const nextQuestionCount = draft?.itemCount ?? questionCount;
+    const nextDraftQuestions =
+      draft?.questions ?? buildQuestionDrafts(nextQuestionCount, [], quiz?.questions ?? []);
 
     setSelectedQuizId(quizId);
-    setSelectedItemCount(String(questionCount));
-    setEditorSourceText(quiz?.sourceText ?? '');
+    setSelectedItemCount(String(nextQuestionCount));
+    setEditorSourceText(draft?.sourceText ?? quiz?.sourceText ?? '');
     setEditorQuestions(nextDraftQuestions);
-    setQuizInstances((current) =>
-      current.map((entry) =>
-        entry.id === quizId
-          ? {
-              ...entry,
-              itemCount: questionCount,
-              questions: nextDraftQuestions
-            }
-          : entry
-      )
-    );
-    setLoadedFileName('');
-    setIsSourceScanned(false);
-    setIsScanManualLocked(false);
+    setLoadedFileName(draft?.loadedFileName ?? '');
+    setIsSourceScanned(draft?.isSourceScanned ?? false);
+    setIsScanManualLocked(draft?.isScanManualLocked ?? false);
+    setAppliedScanRange(draft?.appliedScanRange ?? null);
     setSaveValidationMessage('');
     setInvalidAnswerQuestionIds([]);
-    setEditorMode('text');
-    setScanMessage('Paste questions or upload a PDF, DOC, DOCX, or text file to scan them.');
+    setEditorMode(draft?.editorMode ?? 'text');
+    setScanMessage(
+      draft?.scanMessage ??
+        'Paste questions or upload a PDF, DOC, DOCX, or text file to scan them.'
+    );
     setShowQuestionCountModal(false);
     setShowPlayModal(false);
     setOpenQuizMenuId(null);
@@ -541,6 +820,29 @@ function Practices() {
     setShowPlayModal(true);
   }
 
+  function openSelectedQuizFlow(quiz: QuizInstance) {
+    const draft = quizDrafts[getDraftKey(selectedTopicId, quiz.id)];
+
+    setShowQuizOverviewModal(false);
+
+    if (draft) {
+      launchQuizEditor(quiz.id, draft.itemCount);
+      return;
+    }
+
+    if (quiz.attempts > 0) {
+      openQuizResultSummary(quiz.id);
+      return;
+    }
+
+    if (hasSavedQuizContent(quiz)) {
+      openQuizPlayer(quiz.id);
+      return;
+    }
+
+    openQuizCountStep(quiz.id);
+  }
+
   function handleEditQuiz(quizId: number) {
     const quiz = quizInstances.find((entry) => entry.id === quizId);
     launchQuizEditor(quizId, quiz?.itemCount ?? 10);
@@ -550,6 +852,48 @@ function Practices() {
     setPendingDeleteQuizId(quizId);
     setOpenQuizMenuId(null);
     setShowDeleteModal(true);
+  }
+
+  function handleDeleteTopicRequest(topicId: number) {
+    setPendingDeleteTopicId(topicId);
+    setOpenTopicMenuId(null);
+    setShowDeleteTopicModal(true);
+  }
+
+  function handleConfirmDeleteTopic() {
+    if (pendingDeleteTopicId === null) {
+      return;
+    }
+
+    const remainingTopics = practiceTopics.filter((topic) => topic.id !== pendingDeleteTopicId);
+    const nextSelectedRawId =
+      selectedTopicId === pendingDeleteTopicId
+        ? remainingTopics[0]?.id ?? 1
+        : selectedTopicId;
+    const nextExpandedRawId =
+      expandedTopicId === pendingDeleteTopicId
+        ? remainingTopics[0]?.id ?? null
+        : expandedTopicId;
+    const nextSelectedTopicId =
+      remainingTopics.findIndex((topic) => topic.id === nextSelectedRawId) + 1 || 1;
+    const expandedTopicIndex =
+      nextExpandedRawId === null
+        ? -1
+        : remainingTopics.findIndex((topic) => topic.id === nextExpandedRawId);
+    const nextExpandedTopicId =
+      nextExpandedRawId === null
+        ? null
+        : expandedTopicIndex >= 0
+        ? expandedTopicIndex + 1
+        : remainingTopics[0]
+        ? 1
+        : null;
+
+    void persistPracticeTopics(remainingTopics, nextSelectedTopicId, nextExpandedTopicId);
+    setPendingDeleteTopicId(null);
+    setShowDeleteTopicModal(false);
+    setShowQuizModal(false);
+    setShowQuizOverviewModal(false);
   }
 
   function handleConfirmDeleteQuiz() {
@@ -568,7 +912,11 @@ function Practices() {
         }))
       }));
 
-    void persistPracticeWorkspace(savedTitle, nextQuizzes);
+    void persistPracticeTopics(
+      buildNextTopicsForSelectedTopic(savedTitle, nextQuizzes),
+      selectedTopicId,
+      expandedTopicId
+    );
     setSelectedQuizId(1);
     setPendingDeleteQuizId(null);
     setShowDeleteModal(false);
@@ -602,17 +950,9 @@ function Practices() {
   }
 
   function handleQuizCardClick(quiz: QuizInstance) {
-    if (quiz.attempts > 0) {
-      openQuizResultSummary(quiz.id);
-      return;
-    }
-
-    if (hasSavedQuizContent(quiz)) {
-      openQuizPlayer(quiz.id);
-      return;
-    }
-
-    openQuizCountStep(quiz.id);
+    setSelectedQuizId(quiz.id);
+    setOpenQuizMenuId(null);
+    setShowQuizOverviewModal(true);
   }
 
   function openQuizEditor() {
@@ -622,23 +962,26 @@ function Practices() {
   function handleItemCountChange(nextValue: string) {
     const nextCount = Number(nextValue);
     setSelectedItemCount(nextValue);
-    setEditorQuestions((current) => buildQuestionDrafts(nextCount, [], current));
+    setEditorQuestions((current) => {
+      const nextQuestions = buildQuestionDrafts(nextCount, [], current);
+      saveQuizDraft(selectedQuizId, {
+        itemCount: nextCount,
+        questions: nextQuestions
+      });
+      return nextQuestions;
+    });
   }
 
-  function handleScanQuestions() {
-    const limit = Number(selectedItemCount);
+  function applyScannedQuestions(
+    parsedQuestions: QuestionEntry[],
+    totalDetected: number,
+    limit: number,
+    startQuestionNumber: number,
+    showAnswerAssistOnMissing = true
+  ) {
     const shouldLockManualChoice = isSourceScanned && isScanManualLocked;
-    const { questions: parsedQuestions, totalDetected } = createQuestionsFromSource(
-      editorSourceText,
-      limit
-    );
-
-    if (!parsedQuestions.length) {
-      setScanMessage('No questions were detected. Try numbered questions like 1. 2. 3.');
-      return;
-    }
-
     const nextQuestions = buildScannedQuestionDrafts(limit, parsedQuestions, editorQuestions);
+    const endQuestionNumber = startQuestionNumber + parsedQuestions.length - 1;
     const missingAnswersCount = nextQuestions
       .slice(0, parsedQuestions.length)
       .filter((question) => !question.answer.trim()).length;
@@ -646,8 +989,30 @@ function Practices() {
 
     setEditorQuestions(nextQuestions);
     setIsSourceScanned(true);
+    setAppliedScanRange(
+      totalDetected > limit
+        ? {
+            start: startQuestionNumber,
+            end: endQuestionNumber,
+            total: totalDetected
+          }
+        : null
+    );
+    saveQuizDraft(selectedQuizId, {
+      itemCount: limit,
+      questions: nextQuestions,
+      isSourceScanned: true,
+      appliedScanRange:
+        totalDetected > limit
+          ? {
+              start: startQuestionNumber,
+              end: endQuestionNumber,
+              total: totalDetected
+            }
+          : null
+    });
 
-    if (missingAnswersCount > 0) {
+    if (missingAnswersCount > 0 && showAnswerAssistOnMissing) {
       setPendingSaveQuestions(nextQuestions);
       setAnswerAssistMode(shouldLockManualChoice ? 'ai' : 'manual');
       setAnswerAssistStep('select');
@@ -657,8 +1022,10 @@ function Practices() {
       setScanMessage(
         `Scanned ${parsedQuestions.length} question${
           parsedQuestions.length === 1 ? '' : 's'
-        } from ${editorMode === 'file' && loadedFileName ? loadedFileName : 'the text input'}${
-          totalDetected > limit ? `. Only the first ${limit} question${limit === 1 ? '' : 's'} were used.` : '.'
+        } from question ${startQuestionNumber} to ${
+          endQuestionNumber
+        } in ${editorMode === 'file' && loadedFileName ? loadedFileName : 'the text input'}${
+          totalDetected > limit ? '.' : '.'
         } ${
           detectedAnswersCount > 0
             ? `${detectedAnswersCount} answer${detectedAnswersCount === 1 ? ' was' : 's were'} found automatically.`
@@ -668,23 +1035,138 @@ function Practices() {
       return;
     }
 
-    setPendingSaveQuestions(null);
+    setPendingSaveQuestions(
+      missingAnswersCount > 0 ? nextQuestions : null
+    );
     setAnswerAssistTrigger('save');
     setAnswerAssistQuestionScope(null);
+
+    if (missingAnswersCount > 0) {
+      setScanMessage(
+        `Question range ${startQuestionNumber} to ${endQuestionNumber} is ready. Click Scanned if you want to choose Manual or AI for the missing answers.`
+      );
+      return;
+    }
+
     setScanMessage(
       `Scanned ${parsedQuestions.length} question${
         parsedQuestions.length === 1 ? '' : 's'
-      } from ${editorMode === 'file' && loadedFileName ? loadedFileName : 'the text input'}${
-        totalDetected > limit ? `. Only the first ${limit} question${limit === 1 ? '' : 's'} were used` : ''
-      } and filled the answers automatically.`
+      } from question ${startQuestionNumber} to ${
+        endQuestionNumber
+      } in ${editorMode === 'file' && loadedFileName ? loadedFileName : 'the text input'} and filled the answers automatically.`
+    );
+  }
+
+  function openScanRangeSelection(
+    parsedQuestions: QuestionEntry[],
+    totalDetected: number,
+    preferredStartQuestion = 1,
+    mode: ScanRangeModalMode = 'initial'
+  ) {
+    const limit = Number(selectedItemCount);
+    const maxStart = Math.max(totalDetected - limit + 1, 1);
+    const nextStartQuestion = Math.min(Math.max(preferredStartQuestion, 1), maxStart);
+
+    setPendingScanSelection({
+      questions: parsedQuestions,
+      totalDetected
+    });
+    setScanRangeModalMode(mode);
+    setScanStartQuestion(String(nextStartQuestion));
+    setShowScanRangeModal(true);
+  }
+
+  function handleOpenAnswerAssistFromScan() {
+    const nextPendingQuestions = editorQuestions.map((question) => ({
+      ...question
+    }));
+    const missingAnswersCount = nextPendingQuestions.filter(
+      (question) => !question.answer.trim()
+    ).length;
+
+    if (!missingAnswersCount) {
+      setScanMessage('This scanned question range already has answers filled in.');
+      return;
+    }
+
+    setPendingSaveQuestions(nextPendingQuestions);
+    setAnswerAssistMode(isScanManualLocked ? 'ai' : 'manual');
+    setAnswerAssistStep('select');
+    setAnswerAssistTrigger('scan');
+    setAnswerAssistQuestionScope(nextPendingQuestions.length);
+    setShowAnswerAssistModal(true);
+  }
+
+  function handleScanQuestions() {
+    if (isSourceScanned) {
+      handleOpenAnswerAssistFromScan();
+      return;
+    }
+
+    const limit = Number(selectedItemCount);
+    const { questions: parsedQuestions, totalDetected } = createQuestionsFromSource(editorSourceText);
+
+    if (!parsedQuestions.length) {
+      setScanMessage('No questions were detected. Try numbered questions like 1. 2. 3.');
+      return;
+    }
+
+    if (totalDetected > limit) {
+      openScanRangeSelection(parsedQuestions, totalDetected, appliedScanRange?.start ?? 1, 'initial');
+      return;
+    }
+
+    applyScannedQuestions(parsedQuestions.slice(0, limit), totalDetected, limit, 1);
+  }
+
+  function handleEditScanRange() {
+    const limit = Number(selectedItemCount);
+    const { questions: parsedQuestions, totalDetected } = createQuestionsFromSource(editorSourceText);
+
+    if (!parsedQuestions.length || totalDetected <= limit) {
+      return;
+    }
+
+    openScanRangeSelection(parsedQuestions, totalDetected, appliedScanRange?.start ?? 1, 'edit');
+  }
+
+  function handleConfirmScanRange() {
+    if (!pendingScanSelection) {
+      setShowScanRangeModal(false);
+      return;
+    }
+
+    const limit = Number(selectedItemCount);
+    const maxStart = Math.max(pendingScanSelection.totalDetected - limit + 1, 1);
+    const requestedStart = Number(scanStartQuestion);
+    const startQuestionNumber = Math.min(Math.max(requestedStart, 1), maxStart);
+    const startIndex = startQuestionNumber - 1;
+    const selectedQuestions = pendingScanSelection.questions.slice(startIndex, startIndex + limit);
+    const shouldOpenAnswerAssist = scanRangeModalMode !== 'edit';
+
+    setShowScanRangeModal(false);
+    setPendingScanSelection(null);
+    setScanRangeModalMode('initial');
+    applyScannedQuestions(
+      selectedQuestions,
+      pendingScanSelection.totalDetected,
+      limit,
+      startQuestionNumber,
+      shouldOpenAnswerAssist
     );
   }
 
   function handleQuestionChange(questionId: number, field: 'prompt' | 'answer', value: string) {
     setEditorQuestions((current) =>
-      current.map((question) =>
-        question.id === questionId ? { ...question, [field]: value } : question
-      )
+      {
+        const nextQuestions = current.map((question) =>
+          question.id === questionId ? { ...question, [field]: value } : question
+        );
+        saveQuizDraft(selectedQuizId, {
+          questions: nextQuestions
+        });
+        return nextQuestions;
+      }
     );
 
     if (field === 'answer' && value.trim()) {
@@ -702,6 +1184,10 @@ function Practices() {
 
       const nextQuestions = [...current, nextQuestion];
       setSelectedItemCount(String(nextQuestions.length));
+      saveQuizDraft(selectedQuizId, {
+        itemCount: nextQuestions.length,
+        questions: nextQuestions
+      });
       return nextQuestions;
     });
     setScanMessage('Added a new question card. You can type the question and answer manually.');
@@ -720,7 +1206,20 @@ function Practices() {
       setLoadedFileName(file.name);
       setIsSourceScanned(false);
       setIsScanManualLocked(false);
+      setAppliedScanRange(null);
+      setPendingScanSelection(null);
+      setShowScanRangeModal(false);
+      setScanRangeModalMode('initial');
       setEditorSourceText(extracted.text);
+      saveQuizDraft(selectedQuizId, {
+        sourceText: extracted.text,
+        editorMode: 'file',
+        loadedFileName: file.name,
+        isSourceScanned: false,
+        isScanManualLocked: false,
+        appliedScanRange: null,
+        scanMessage: `${file.name} (${extracted.sourceLabel}) is ready. Click Scan to check for answers and fill the question cards.`
+      });
       setScanMessage(
         `${file.name} (${extracted.sourceLabel}) is ready. Click Scan to check for answers and fill the question cards.`
       );
@@ -735,6 +1234,16 @@ function Practices() {
     setEditorSourceText(value);
     setIsSourceScanned(false);
     setIsScanManualLocked(false);
+    setAppliedScanRange(null);
+    setPendingScanSelection(null);
+    setShowScanRangeModal(false);
+    setScanRangeModalMode('initial');
+    saveQuizDraft(selectedQuizId, {
+      sourceText: value,
+      isSourceScanned: false,
+      isScanManualLocked: false,
+      appliedScanRange: null
+    });
   }
 
   function handleClearLoadedFile() {
@@ -744,13 +1253,27 @@ function Practices() {
     setEditorQuestions(createDefaultQuestions(Number(selectedItemCount)));
     setIsSourceScanned(false);
     setIsScanManualLocked(false);
+    setAppliedScanRange(null);
     setSaveValidationMessage('');
     setInvalidAnswerQuestionIds([]);
     setPendingSaveQuestions(null);
+    setPendingScanSelection(null);
     setAnswerAssistStep('select');
     setAnswerAssistQuestionScope(null);
     setShowAnswerAssistModal(false);
+    setShowScanRangeModal(false);
+    setScanRangeModalMode('initial');
     setScanMessage('Current file cleared. Upload a new file or paste new questions to scan again.');
+    saveQuizDraft(selectedQuizId, {
+      sourceText: '',
+      questions: createDefaultQuestions(Number(selectedItemCount)),
+      editorMode: 'text',
+      loadedFileName: '',
+      isSourceScanned: false,
+      isScanManualLocked: false,
+      appliedScanRange: null,
+      scanMessage: 'Current file cleared. Upload a new file or paste new questions to scan again.'
+    });
   }
 
   function commitQuizItems(nextQuestions: QuestionEntry[]) {
@@ -767,7 +1290,12 @@ function Practices() {
         : quiz
     );
 
-    void persistPracticeWorkspace(savedTitle, nextQuizzes);
+    void persistPracticeTopics(
+      buildNextTopicsForSelectedTopic(savedTitle, nextQuizzes),
+      selectedTopicId,
+      expandedTopicId
+    );
+    clearQuizDraft(selectedQuizId);
     setPendingSaveQuestions(null);
     setAnswerAssistQuestionScope(null);
     setSaveValidationMessage('');
@@ -813,6 +1341,11 @@ function Practices() {
       if (answerAssistTrigger === 'scan') {
         setIsSourceScanned(true);
         setIsScanManualLocked(true);
+        saveQuizDraft(selectedQuizId, {
+          isSourceScanned: true,
+          isScanManualLocked: true,
+          scanMessage: 'Scan complete. Please review the questions and type the missing answers manually.'
+        });
       }
       setScanMessage(
         answerAssistTrigger === 'scan'
@@ -854,6 +1387,9 @@ function Practices() {
 
     setEditorQuestions(generatedQuestions);
     setPendingSaveQuestions(generatedQuestions);
+    saveQuizDraft(selectedQuizId, {
+      questions: generatedQuestions
+    });
 
     if (answerAssistTrigger === 'scan') {
       setShowAnswerAssistModal(false);
@@ -861,8 +1397,19 @@ function Practices() {
       setPendingSaveQuestions(null);
       setAnswerAssistQuestionScope(null);
       setIsSourceScanned(true);
+      saveQuizDraft(selectedQuizId, {
+        questions: generatedQuestions,
+        isSourceScanned: true
+      });
 
       if (unresolvedCount > 0) {
+        saveQuizDraft(selectedQuizId, {
+          questions: generatedQuestions,
+          isSourceScanned: true,
+          scanMessage: `AI filled ${filledCount} answer${
+            filledCount === 1 ? '' : 's'
+          }, but ${unresolvedCount} still need manual review.`
+        });
         setScanMessage(
           `AI filled ${filledCount} answer${
             filledCount === 1 ? '' : 's'
@@ -871,6 +1418,12 @@ function Practices() {
         return;
       }
 
+      saveQuizDraft(selectedQuizId, {
+        questions: generatedQuestions,
+        isSourceScanned: true,
+        scanMessage:
+          'AI filled the missing answers into the Type the correct answer fields. Please review them before saving the quiz.'
+      });
       setScanMessage('AI filled the missing answers into the Type the correct answer fields. Please review them before saving the quiz.');
       return;
     }
@@ -929,7 +1482,11 @@ function Practices() {
               }
             : quiz
       );
-      void persistPracticeWorkspace(savedTitle, nextQuizzes);
+      void persistPracticeTopics(
+        buildNextTopicsForSelectedTopic(savedTitle, nextQuizzes),
+        selectedTopicId,
+        expandedTopicId
+      );
       setPlayResult({
         accuracy,
         attempt: nextAttempt,
@@ -961,71 +1518,152 @@ function Practices() {
   return (
     <>
       <section className="practice-builder-shell page-enter glass-panel">
-        <div className="practice-intro">
-          <span className="eyebrow">Practices</span>
-          <h1>Practices</h1>
-          <p>Choose a practice module, create quizzes, then set the questions and answers for each quiz.</p>
-          <div className="practice-sync-note">
-            {isPracticeLoading ? 'Syncing Practice workspace...' : practiceStatus || 'Practice workspace ready.'}
+        <div className="practice-intro-head">
+          <div className="practice-intro">
+            <h1>Practices</h1>
+            <p>Create practice topics, choose how many quizzes each topic should store, then build the questions and answers for every quiz card.</p>
           </div>
-        </div>
 
-        <div className="practice-grid">
           <button
-            className="practice-tile"
-            onClick={handleOpenQuizCollection}
+            className="practice-add-topic-button"
+            onClick={() => handleOpenTopicModal('create')}
             type="button"
           >
-            <div className="practice-tile-top">
-              <div className="practice-tile-icon">Q</div>
-              <span className="practice-tile-badge">Quiz</span>
-            </div>
-
-            <div className="practice-tile-copy">
-              <h2>{savedTitle}</h2>
-              <p>Click this created quiz to show all {savedCount} quizzes and manage each one.</p>
-            </div>
-
-            <div className="practice-tile-foot">
-              <span className="practice-meta">
-                {savedCount} {Number(savedCount) === 1 ? 'quiz' : 'quizzes'}
-              </span>
-              <span className="practice-arrow">{showQuizCollection ? '-' : '+'}</span>
-            </div>
+            Add Practice
           </button>
         </div>
 
-        <div className="practice-summary">
-          <div className="practice-summary-head">
-            <div>
-              <div className="practice-summary-label">Current Quiz Setup</div>
-              <strong>{savedTitle}</strong>
-              <p>
-                {savedCount} {Number(savedCount) === 1 ? 'quiz' : 'quizzes'} selected
-              </p>
-            </div>
-            <button
-              className="practice-secondary-button"
-              onClick={() => setShowQuizModal(true)}
-              type="button"
+        <div className="practice-grid">
+          {visiblePracticeTopics.map((topic) => (
+            <article
+              key={topic.id}
+              className={`practice-tile ${selectedTopicId === topic.id ? 'active' : ''}`}
+              onClick={() => handleOpenQuizCollection(topic.id)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  handleOpenQuizCollection(topic.id);
+                }
+              }}
+              role="button"
+              tabIndex={0}
             >
-              Edit Quiz Setup
-            </button>
-          </div>
+              <div className="practice-tile-top">
+                <div className="practice-tile-icon">Q</div>
+                <div className="practice-tile-actions">
+                  <button
+                    aria-label={`Open actions for ${topic.title}`}
+                    className="practice-menu-button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setOpenQuizMenuId(null);
+                      setOpenTopicMenuId((current) => (current === topic.id ? null : topic.id));
+                    }}
+                    type="button"
+                  >
+                    <span />
+                    <span />
+                    <span />
+                  </button>
+                  {openTopicMenuId === topic.id && (
+                    <div
+                      className="practice-menu-dropdown"
+                      onClick={(event) => event.stopPropagation()}
+                      role="menu"
+                    >
+                      <button
+                        className="practice-menu-item"
+                        onClick={() => handleOpenTopicModal('edit', topic.id)}
+                        type="button"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="practice-menu-item delete"
+                        onClick={() => handleDeleteTopicRequest(topic.id)}
+                        type="button"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="practice-tile-copy">
+                <h2>{topic.title}</h2>
+                <p>Open this topic to manage its {topic.quizzes.length} practice quiz card{topic.quizzes.length === 1 ? '' : 's'}.</p>
+              </div>
+
+              <div className="practice-tile-foot">
+                <span className="practice-meta">
+                  {topic.quizzes.length} {topic.quizzes.length === 1 ? 'quiz' : 'quizzes'}
+                </span>
+                <span className="practice-arrow">{expandedTopicId === topic.id ? '-' : '+'}</span>
+              </div>
+            </article>
+          ))}
         </div>
 
-        {showQuizCollection && (
+        {practiceTopics.length > 0 && (
+          <div className="practice-grid-nav">
+            <button
+              aria-label="Go to previous topic page"
+              className={`practice-grid-arrow ${topicPage === 0 ? 'hidden' : ''}`}
+              disabled={topicPage === 0}
+              onClick={() => setTopicPage((current) => Math.max(current - 1, 0))}
+              type="button"
+            >
+              &larr;
+            </button>
+
+            <label className="practice-grid-page-control">
+              <span>Page</span>
+              <input
+                className="practice-grid-page-input"
+                inputMode="numeric"
+                max={Math.min(totalTopicPages, MAX_TOPIC_PAGE_INPUT)}
+                min={1}
+                onBlur={() => commitTopicPage(topicPageInput)}
+                onChange={(event) => setTopicPageInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    commitTopicPage(topicPageInput);
+                  }
+                }}
+                type="number"
+                value={topicPageInput}
+              />
+              <small>of {totalTopicPages}</small>
+            </label>
+
+            <button
+              aria-label="Go to next topic page"
+              className="practice-grid-arrow"
+              disabled={topicPage >= totalTopicPages - 1}
+              onClick={() =>
+                setTopicPage((current) => Math.min(current + 1, totalTopicPages - 1))
+              }
+              type="button"
+            >
+              &rarr;
+            </button>
+          </div>
+        )}
+
+        {expandedTopic && (
           <div className="practice-collection page-enter">
             <div className="practice-collection-head">
               <div>
                 <div className="practice-summary-label">Created Quizzes</div>
-                <strong>{savedTitle}</strong>
-                <p>Click any quiz card below to paste questions, upload a file, and save answers.</p>
+                <strong>{expandedTopic.title}</strong>
+                <p>Click any quiz card below to open its setup, review the question count, and continue.</p>
               </div>
             </div>
 
             <div className="practice-quiz-list">
-              {quizInstances.map((quiz) => (
+              {expandedTopic.quizzes.map((quiz) => (
                 <article
                   key={quiz.id}
                   className="practice-quiz-card"
@@ -1083,14 +1721,12 @@ function Practices() {
                     </div>
                   </div>
                   <h3>
-                    {savedTitle} {quiz.id}
+                    {expandedTopic.title} {quiz.id}
                   </h3>
                   <p>
-                    {quiz.attempts > 0
-                      ? 'Open this quiz to view your saved score, attempt, and analysis.'
-                      : hasSavedQuizContent(quiz)
-                      ? 'Open this saved quiz to answer one question at a time.'
-                      : 'Open this quiz to scan text or a file and fill the answer textboxes.'}
+                    {hasSavedQuizContent(quiz)
+                      ? `${quiz.itemCount} ${quiz.itemCount === 1 ? 'question' : 'questions'} ready`
+                      : 'No question yet'}
                   </p>
                 </article>
               ))}
@@ -1101,23 +1737,23 @@ function Practices() {
 
       <Modal
         open={showQuizModal}
-        title="Quiz Setup"
+        title={topicModalMode === 'create' ? 'Add Practice Topic' : 'Edit Practice Topic'}
         onClose={() => setShowQuizModal(false)}
       >
         <form className="practice-form" onSubmit={handleSubmit}>
           <label className="practice-field">
-            <span>Quiz title</span>
+            <span>Topic title</span>
             <input
               className="practice-input"
               onChange={(event) => setQuizTitle(event.target.value)}
-              placeholder="Enter quiz title"
+              placeholder="Enter topic title"
               type="text"
               value={quizTitle}
             />
           </label>
 
           <label className="practice-field">
-            <span>How many quizzes do you want?</span>
+            <span>How many quizzes should this topic store?</span>
             <select
               className="practice-select"
               onChange={(event) => setQuizCount(event.target.value)}
@@ -1138,14 +1774,116 @@ function Practices() {
             <div className="practice-preview-label">Preview</div>
             <strong>{quizTitle.trim() || 'Untitled Quiz'}</strong>
             <p>
-              {quizCount} {Number(quizCount) === 1 ? 'quiz' : 'quizzes'} ready to prepare
+              {quizCount} {Number(quizCount) === 1 ? 'quiz card' : 'quiz cards'} ready in this topic
             </p>
           </div>
 
           <button className="practice-submit" type="submit">
-            Save Quiz Setup
+            {topicModalMode === 'create' ? 'Create Topic' : 'Save Topic'}
           </button>
         </form>
+      </Modal>
+
+      <Modal
+        open={showQuizOverviewModal}
+        title={selectedQuiz ? `${savedTitle} ${selectedQuiz.id}` : 'Quiz Setup'}
+        onClose={() => setShowQuizOverviewModal(false)}
+      >
+        {selectedQuiz && (
+          <div className="practice-quiz-overview">
+            <div className="practice-preview-card practice-quiz-overview-card">
+              <div className="practice-preview-label">Current Quiz Setup</div>
+              <strong>
+                {savedTitle} {selectedQuiz.id}
+              </strong>
+              <p>
+                {selectedQuiz.itemCount} {selectedQuiz.itemCount === 1 ? 'question' : 'questions'} in this quiz
+              </p>
+            </div>
+
+            <div className="practice-quiz-overview-stats">
+              <div className="practice-quiz-card-stat">
+                <span>Topic</span>
+                <strong>{savedTitle}</strong>
+              </div>
+              <div className="practice-quiz-card-stat">
+                <span>Attempts</span>
+                <strong>{selectedQuiz.attempts}</strong>
+              </div>
+              <div className="practice-quiz-card-stat">
+                <span>Status</span>
+                <strong>
+                  {quizDrafts[getDraftKey(selectedTopicId, selectedQuiz.id)]
+                    ? 'Editing'
+                    : selectedQuiz.attempts > 0
+                    ? 'Completed'
+                    : hasSavedQuizContent(selectedQuiz)
+                    ? 'Ready'
+                    : 'Needs Setup'}
+                </strong>
+              </div>
+            </div>
+
+            <p className="practice-quiz-overview-copy">
+              {quizDrafts[getDraftKey(selectedTopicId, selectedQuiz.id)]
+                ? 'A saved draft already exists for this quiz. Continue editing to keep building from where you left off.'
+                : selectedQuiz.attempts > 0
+                ? `This quiz has ${selectedQuiz.attempts} saved attempt${
+                    selectedQuiz.attempts === 1 ? '' : 's'
+                  } and can open directly to the result summary.`
+                : hasSavedQuizContent(selectedQuiz)
+                ? 'This quiz already has saved questions and answers, so it is ready to play or edit.'
+                : 'This quiz is still empty. Open the setup flow to choose the question count and start building it.'}
+            </p>
+
+            <div className="practice-quiz-overview-actions">
+              {selectedQuiz.attempts > 0 ? (
+                <>
+                  <button
+                    className="practice-quiz-overview-link"
+                    onClick={() => openSelectedQuizFlow(selectedQuiz)}
+                    type="button"
+                  >
+                    View Result
+                  </button>
+                  <button
+                    className="practice-submit"
+                    onClick={() => setShowQuizOverviewModal(false)}
+                    type="button"
+                  >
+                    Okay
+                  </button>
+                </>
+              ) : (
+                <>
+                  {hasSavedQuizContent(selectedQuiz) && (
+                    <button
+                      className="practice-secondary-button"
+                      onClick={() => {
+                        setShowQuizOverviewModal(false);
+                        handleEditQuiz(selectedQuiz.id);
+                      }}
+                      type="button"
+                    >
+                      Edit Quiz Content
+                    </button>
+                  )}
+                  <button
+                    className="practice-submit"
+                    onClick={() => openSelectedQuizFlow(selectedQuiz)}
+                    type="button"
+                  >
+                    {quizDrafts[getDraftKey(selectedTopicId, selectedQuiz.id)]
+                      ? 'Continue Editing'
+                      : hasSavedQuizContent(selectedQuiz)
+                      ? 'Open Quiz'
+                      : 'Start Setup'}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
       </Modal>
 
       <Modal
@@ -1225,6 +1963,114 @@ function Practices() {
             </button>
             <button className="practice-danger-button" onClick={handleConfirmDeleteQuiz} type="button">
               Delete
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={showDeleteTopicModal}
+        title="Delete Topic"
+        onClose={() => {
+          setPendingDeleteTopicId(null);
+          setShowDeleteTopicModal(false);
+        }}
+      >
+        <div className="practice-delete-shell">
+          <p className="practice-delete-copy">
+            Are you sure you want to delete{' '}
+            <strong>
+              {pendingDeleteTopicId
+                ? practiceTopics.find((topic) => topic.id === pendingDeleteTopicId)?.title ??
+                  'this topic'
+                : 'this topic'}
+            </strong>
+            ?
+          </p>
+          <div className="practice-delete-actions">
+            <button
+              className="practice-cancel-button"
+              onClick={() => {
+                setPendingDeleteTopicId(null);
+                setShowDeleteTopicModal(false);
+              }}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="practice-danger-button"
+              onClick={handleConfirmDeleteTopic}
+              type="button"
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={showScanRangeModal}
+        backdropClassName="modal-backdrop-front modal-backdrop-range"
+        title="Choose Question Range"
+        onClose={() => {
+          setShowScanRangeModal(false);
+          setPendingScanSelection(null);
+          setScanStartQuestion('1');
+          setScanRangeModalMode('initial');
+        }}
+      >
+        <div className="practice-scan-range-shell">
+          <p className="practice-answer-assist-copy">
+            {pendingScanSelection?.totalDetected ?? 0} questions were detected, but this quiz is set to{' '}
+            {selectedItemCount}. Choose which question number should start the scan.
+          </p>
+
+          <div className="practice-scan-range-grid">
+            <label className="practice-field">
+              <span>Start from</span>
+              <select
+                className="practice-select"
+                onChange={(event) => setScanStartQuestion(event.target.value)}
+                value={scanStartQuestion}
+              >
+                {Array.from({ length: maxScanStartQuestion }, (_, index) => {
+                  const value = String(index + 1);
+                  return (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
+
+            <div className="practice-preview-card">
+              <div className="practice-preview-label">Selected Range</div>
+              <strong>
+                {scanStartQuestion} - {previewScanEndQuestion}
+              </strong>
+              <p>
+                Questions {scanStartQuestion} to {previewScanEndQuestion} will be used for this scan.
+              </p>
+            </div>
+          </div>
+
+          <div className="practice-answer-assist-actions">
+            <button
+              className="practice-cancel-button"
+              onClick={() => {
+                setShowScanRangeModal(false);
+                setPendingScanSelection(null);
+                setScanStartQuestion('1');
+                setScanRangeModalMode('initial');
+              }}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button className="practice-submit" onClick={handleConfirmScanRange} type="button">
+              {scanRangeModalMode === 'edit' ? 'Okay' : 'Continue Scan'}
             </button>
           </div>
         </div>
@@ -1355,6 +2201,15 @@ function Practices() {
               />
 
               <div className="practice-source-actions">
+                {appliedScanRange && appliedScanRange.total > Number(selectedItemCount) && (
+                  <button
+                    className="practice-scan-range-chip"
+                    onClick={handleEditScanRange}
+                    type="button"
+                  >
+                    {appliedScanRange.start}-{appliedScanRange.end}
+                  </button>
+                )}
                 <button className="practice-scan-button" onClick={handleScanQuestions} type="button">
                   {isSourceScanned ? 'Scanned' : 'Scan'}
                 </button>
@@ -1515,7 +2370,7 @@ function Practices() {
                 <div className="practice-play-head">
                   <div>
                     <div className="practice-preview-label">Quiz Complete</div>
-                    <strong>
+                    <strong className={getAccuracyToneClass(playResult?.accuracy ?? 0)}>
                       Accuracy: {playResult?.accuracy ?? 0}%
                     </strong>
                   </div>
@@ -1619,7 +2474,7 @@ function Practices() {
 
                 <div className="practice-results-actions">
                   <button
-                    className="practice-secondary-button"
+                    className="practice-secondary-button practice-results-close"
                     onClick={() => {
                       setShowResultReview(false);
                       setShowPlayModal(false);
