@@ -1421,7 +1421,7 @@ function Practices() {
     }
 
     setIsGeneratingAnswers(true);
-    setPracticeStatus('Generating missing answers with Gemini...');
+    setPracticeStatus('Generating missing answers with local AI first, then Gemini if needed...');
     showScanMessage('Generating missing answers with AI...');
 
     try {

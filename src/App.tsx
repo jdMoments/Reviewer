@@ -2,13 +2,14 @@ import { useState } from 'react';
 import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import Practices from './pages/Practices';
+import Lesson from './pages/Lesson';
 import Quizzes from './pages/Quizzes';
 import Analysis from './pages/Analysis';
 import Exam from './pages/Exam';
 import Login from './pages/Login';
 import { useAuth } from './context/AuthContext';
 
-export type PageKey = 'dashboard' | 'practices' | 'quizzes' | 'analysis' | 'exam';
+export type PageKey = 'dashboard' | 'practices' | 'lessons' | 'quizzes' | 'analysis' | 'exam';
 
 const CURTAIN_SWAP_MS = 280;
 const CURTAIN_TOTAL_MS = 680;
@@ -25,6 +26,8 @@ function App() {
         return <Dashboard onQuickNavigate={handleNavigate} />;
       case 'practices':
         return <Practices />;
+      case 'lessons':
+        return <Lesson />;
       case 'quizzes':
         return <Quizzes />;
       case 'analysis':

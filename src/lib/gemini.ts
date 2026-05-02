@@ -1,4 +1,7 @@
 const GEMINI_MODEL = import.meta.env.VITE_GEMINI_MODEL || 'gemini-2.0-flash';
+const LOCAL_AI_URL = import.meta.env.VITE_LOCAL_AI_URL || 'http://127.0.0.1:11434/api/generate';
+const LOCAL_AI_MODEL = import.meta.env.VITE_LOCAL_AI_MODEL || 'llama3.2';
+const LOCAL_AI_TIMEOUT_MS = Number(import.meta.env.VITE_LOCAL_AI_TIMEOUT_MS || '12000');
 const GEMINI_API_KEYS = [
   import.meta.env.VITE_GEMINI_API_KEY,
   import.meta.env.VITE_GEMINI_API_KEY_2,
@@ -31,6 +34,22 @@ type GeminiResponse = {
   candidates?: GeminiCandidate[];
 };
 
+type LocalAiResponse =
+  | {
+      response?: string;
+      message?: {
+        content?: string;
+      };
+      choices?: Array<{
+        message?: {
+          content?: string;
+        };
+        text?: string;
+      }>;
+      candidates?: GeminiCandidate[];
+    }
+  | null;
+
 type GeminiErrorDetail = {
   '@type'?: string;
   retryDelay?: string;
@@ -59,6 +78,38 @@ function extractJsonPayload(text: string) {
   }
 
   return text.trim();
+}
+
+function extractResponseText(payload: LocalAiResponse) {
+  if (!payload || typeof payload !== 'object') {
+    return '';
+  }
+
+  if (typeof payload.response === 'string') {
+    return payload.response.trim();
+  }
+
+  if (typeof payload.message?.content === 'string') {
+    return payload.message.content.trim();
+  }
+
+  if (typeof payload.choices?.[0]?.message?.content === 'string') {
+    return payload.choices[0].message.content.trim();
+  }
+
+  if (typeof payload.choices?.[0]?.text === 'string') {
+    return payload.choices[0].text.trim();
+  }
+
+  if (payload.candidates?.length) {
+    return payload.candidates
+      .flatMap((candidate) => candidate.content?.parts ?? [])
+      .map((part) => part.text || '')
+      .join('')
+      .trim();
+  }
+
+  return '';
 }
 
 function normalizeAiAnswers(payload: unknown) {
@@ -122,6 +173,41 @@ function delay(ms: number) {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
   });
+}
+
+async function requestLocalAi(prompt: string) {
+  const abortController = new AbortController();
+  const timeoutId = window.setTimeout(() => abortController.abort(), LOCAL_AI_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(LOCAL_AI_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: LOCAL_AI_MODEL,
+        prompt,
+        stream: false
+      }),
+      signal: abortController.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`Local AI request failed with status ${response.status}.`);
+    }
+
+    const payload = (await response.json()) as LocalAiResponse;
+    const text = extractResponseText(payload);
+
+    if (!text) {
+      throw new Error('Local AI returned an empty response.');
+    }
+
+    return normalizeAiAnswers(JSON.parse(extractJsonPayload(text)));
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 }
 
 function getRotatedApiKeys() {
@@ -190,7 +276,7 @@ function parseGeminiError(errorText: string): ParsedGeminiError {
 }
 
 export async function generateAnswersWithGemini(questions: AiQuestionInput[]) {
-  if (!GEMINI_API_KEYS.length) {
+  if (!GEMINI_API_KEYS.length && !LOCAL_AI_URL) {
     throw new Error('Missing Gemini API keys in the app environment.');
   }
 
@@ -206,6 +292,20 @@ export async function generateAnswersWithGemini(questions: AiQuestionInput[]) {
     'Questions:',
     JSON.stringify(questions, null, 2)
   ].join('\n');
+
+  try {
+    const localAnswers = await requestLocalAi(prompt);
+
+    if (localAnswers.length) {
+      return localAnswers;
+    }
+  } catch {
+    // Fall back to Gemini when the local model is unavailable or returns invalid output.
+  }
+
+  if (!GEMINI_API_KEYS.length) {
+    throw new Error('Local AI is unavailable and Gemini API keys are missing.');
+  }
 
   let lastErrorMessage = 'Gemini request failed';
   const maxQuotaRetryRounds = 2;

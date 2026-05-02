@@ -9,10 +9,11 @@ type SidebarProps = {
 
 const navItems: Array<{ key: PageKey; label: string; icon: string }> = [
   { key: 'dashboard', label: 'Dashboard', icon: '🏠' },
+  { key: 'lessons', label: 'Lessons', icon: '📚' },
   { key: 'practices', label: 'Practices', icon: '📝' },
   { key: 'quizzes', label: 'Quizzes', icon: '🧩' },
-  { key: 'analysis', label: 'Analysis', icon: '📊' },
-  { key: 'exam', label: 'Exam', icon: '📋' }
+  { key: 'exam', label: 'Exam', icon: '📋' },
+  { key: 'analysis', label: 'Analysis', icon: '📊' }
 ];
 
 function Sidebar({ activePage, onNavigate, onLogout }: SidebarProps) {
