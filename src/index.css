@@ -2806,6 +2806,10 @@ a {
   line-height: 1.5;
 }
 
+.practice-scan-message.error {
+  color: #d14343;
+}
+
 .practice-file-note {
   flex: 1;
   min-width: 0;

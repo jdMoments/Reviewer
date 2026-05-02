@@ -67,6 +67,7 @@ type AppliedScanRange = {
   end: number;
   total: number;
 };
+type ScanMessageTone = 'info' | 'error';
 type ScanRangeModalMode = 'initial' | 'edit';
 type QuizEditorDraft = {
   itemCount: number;
@@ -78,6 +79,7 @@ type QuizEditorDraft = {
   isScanManualLocked: boolean;
   appliedScanRange: AppliedScanRange | null;
   scanMessage: string;
+  scanMessageTone: ScanMessageTone;
 };
 
 function createDefaultQuestions(count: number) {
@@ -445,6 +447,7 @@ function Practices() {
   const [isSourceScanned, setIsSourceScanned] = useState(false);
   const [isScanManualLocked, setIsScanManualLocked] = useState(false);
   const [scanMessage, setScanMessage] = useState('Paste questions or upload a PDF, DOC, DOCX, or text file to scan them.');
+  const [scanMessageTone, setScanMessageTone] = useState<ScanMessageTone>('info');
   const [saveValidationMessage, setSaveValidationMessage] = useState('');
   const [invalidAnswerQuestionIds, setInvalidAnswerQuestionIds] = useState<number[]>([]);
   const [isPracticeLoading, setIsPracticeLoading] = useState(false);
@@ -546,6 +549,18 @@ function Practices() {
 
   function getDraftKey(topicId: number, quizId: number) {
     return `${topicId}-${quizId}`;
+  }
+
+  function createScanMessageDraft(message: string, tone: ScanMessageTone = 'info') {
+    return {
+      scanMessage: message,
+      scanMessageTone: tone
+    };
+  }
+
+  function showScanMessage(message: string, tone: ScanMessageTone = 'info') {
+    setScanMessage(message);
+    setScanMessageTone(tone);
   }
 
   function applyPracticeTopics(
@@ -733,6 +748,7 @@ function Practices() {
       isScanManualLocked,
       appliedScanRange,
       scanMessage,
+      scanMessageTone,
       ...overrides
     };
   }
@@ -805,6 +821,7 @@ function Practices() {
       draft?.scanMessage ??
         'Paste questions or upload a PDF, DOC, DOCX, or text file to scan them.'
     );
+    setScanMessageTone(draft?.scanMessageTone ?? 'info');
     setShowQuestionCountModal(false);
     setShowPlayModal(false);
     setOpenQuizMenuId(null);
@@ -1021,7 +1038,7 @@ function Practices() {
       setAnswerAssistTrigger('scan');
       setAnswerAssistQuestionScope(parsedQuestions.length);
       setShowAnswerAssistModal(true);
-      setScanMessage(
+      showScanMessage(
         `Scanned ${parsedQuestions.length} question${
           parsedQuestions.length === 1 ? '' : 's'
         } from question ${startQuestionNumber} to ${
@@ -1044,13 +1061,13 @@ function Practices() {
     setAnswerAssistQuestionScope(null);
 
     if (missingAnswersCount > 0) {
-      setScanMessage(
+      showScanMessage(
         `Question range ${startQuestionNumber} to ${endQuestionNumber} is ready. Click Scanned if you want to choose Manual or AI for the missing answers.`
       );
       return;
     }
 
-    setScanMessage(
+    showScanMessage(
       `Scanned ${parsedQuestions.length} question${
         parsedQuestions.length === 1 ? '' : 's'
       } from question ${startQuestionNumber} to ${
@@ -1087,7 +1104,7 @@ function Practices() {
     ).length;
 
     if (!missingAnswersCount) {
-      setScanMessage('This scanned question range already has answers filled in.');
+      showScanMessage('This scanned question range already has answers filled in.');
       return;
     }
 
@@ -1109,7 +1126,10 @@ function Practices() {
     const { questions: parsedQuestions, totalDetected } = createQuestionsFromSource(editorSourceText);
 
     if (!parsedQuestions.length) {
-      setScanMessage('No questions were detected. Try numbered questions like 1. 2. 3.');
+      showScanMessage(
+        'No questions were detected. Try numbered questions like 1. 2. 3.',
+        'error'
+      );
       return;
     }
 
@@ -1192,7 +1212,7 @@ function Practices() {
       });
       return nextQuestions;
     });
-    setScanMessage('Added a new question card. You can type the question and answer manually.');
+    showScanMessage('Added a new question card. You can type the question and answer manually.');
   }
 
   async function handleFileLoad(event: ChangeEvent<HTMLInputElement>) {
@@ -1220,13 +1240,18 @@ function Practices() {
         isSourceScanned: false,
         isScanManualLocked: false,
         appliedScanRange: null,
-        scanMessage: `${file.name} (${extracted.sourceLabel}) is ready. Click Scan to check for answers and fill the question cards.`
+        ...createScanMessageDraft(
+          `${file.name} (${extracted.sourceLabel}) is ready. Click Scan to check for answers and fill the question cards.`
+        )
       });
-      setScanMessage(
+      showScanMessage(
         `${file.name} (${extracted.sourceLabel}) is ready. Click Scan to check for answers and fill the question cards.`
       );
     } catch {
-      setScanMessage('This file could not be read. Try PDF, DOCX, or a text-based document with numbered questions.');
+      showScanMessage(
+        'This file could not be read. Try PDF, DOCX, or a text-based document with numbered questions.',
+        'error'
+      );
     } finally {
       event.target.value = '';
     }
@@ -1265,7 +1290,7 @@ function Practices() {
     setShowAnswerAssistModal(false);
     setShowScanRangeModal(false);
     setScanRangeModalMode('initial');
-    setScanMessage('Current file cleared. Upload a new file or paste new questions to scan again.');
+    showScanMessage('Current file cleared. Upload a new file or paste new questions to scan again.');
     saveQuizDraft(selectedQuizId, {
       sourceText: '',
       questions: createDefaultQuestions(Number(selectedItemCount)),
@@ -1274,7 +1299,7 @@ function Practices() {
       isSourceScanned: false,
       isScanManualLocked: false,
       appliedScanRange: null,
-      scanMessage: 'Current file cleared. Upload a new file or paste new questions to scan again.'
+      ...createScanMessageDraft('Current file cleared. Upload a new file or paste new questions to scan again.')
     });
   }
 
@@ -1346,10 +1371,12 @@ function Practices() {
         saveQuizDraft(selectedQuizId, {
           isSourceScanned: true,
           isScanManualLocked: true,
-          scanMessage: 'Scan complete. Please review the questions and type the missing answers manually.'
+          ...createScanMessageDraft(
+            'Scan complete. Please review the questions and type the missing answers manually.'
+          )
         });
       }
-      setScanMessage(
+      showScanMessage(
         answerAssistTrigger === 'scan'
           ? 'Scan complete. Please review the questions and type the missing answers manually.'
           : 'Some questions still have no answer. Please enter the missing answers manually before saving.'
@@ -1383,7 +1410,7 @@ function Practices() {
 
     setIsGeneratingAnswers(true);
     setPracticeStatus('Generating missing answers with Gemini...');
-    setScanMessage('Generating missing answers with AI...');
+    showScanMessage('Generating missing answers with AI...');
 
     try {
       const aiAnswers = await generateAnswersWithGemini(
@@ -1436,11 +1463,13 @@ function Practices() {
           saveQuizDraft(selectedQuizId, {
             questions: generatedQuestions,
             isSourceScanned: true,
-            scanMessage: `AI filled ${filledCount} answer${
-              filledCount === 1 ? '' : 's'
-            }, but ${unresolvedCount} still need manual review.`
+            ...createScanMessageDraft(
+              `AI filled ${filledCount} answer${
+                filledCount === 1 ? '' : 's'
+              }, but ${unresolvedCount} still need manual review.`
+            )
           });
-          setScanMessage(
+          showScanMessage(
             `AI filled ${filledCount} answer${
               filledCount === 1 ? '' : 's'
             }, but ${unresolvedCount} still need manual review.`
@@ -1451,10 +1480,11 @@ function Practices() {
         saveQuizDraft(selectedQuizId, {
           questions: generatedQuestions,
           isSourceScanned: true,
-          scanMessage:
+          ...createScanMessageDraft(
             'AI filled the missing answers into the Type the correct answer fields. Please review them before saving the quiz.'
+          )
         });
-        setScanMessage(
+        showScanMessage(
           'AI filled the missing answers into the Type the correct answer fields. Please review them before saving the quiz.'
         );
         return;
@@ -1463,7 +1493,7 @@ function Practices() {
       if (unresolvedCount > 0) {
         setShowAnswerAssistModal(false);
         setAnswerAssistStep('select');
-        setScanMessage(
+        showScanMessage(
           `AI filled ${filledCount} answer${
             filledCount === 1 ? '' : 's'
           }, but ${unresolvedCount} still need manual review.`
@@ -1471,13 +1501,13 @@ function Practices() {
         return;
       }
 
-      setScanMessage('AI generated the missing answers and the quiz was saved.');
+      showScanMessage('AI generated the missing answers and the quiz was saved.');
       commitQuizItems(generatedQuestions);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'The AI request failed for an unknown reason.';
       setPracticeStatus(message);
-      setScanMessage(`AI generation failed: ${message}`);
+      showScanMessage(message, 'error');
     } finally {
       setIsGeneratingAnswers(false);
     }
@@ -2296,7 +2326,13 @@ function Practices() {
                 />
               </div>
 
-              <p className="practice-scan-message">{scanMessage}</p>
+              <p
+                className={`practice-scan-message ${
+                  scanMessageTone === 'error' ? 'error' : ''
+                }`.trim()}
+              >
+                {scanMessage}
+              </p>
             </div>
 
             <div className="practice-answers-panel">
