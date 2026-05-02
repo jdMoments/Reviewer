@@ -5,6 +5,7 @@ const GEMINI_API_KEYS = [
   import.meta.env.VITE_GEMINI_API_KEY_3,
   import.meta.env.VITE_GEMINI_API_KEY_4
 ].filter((key, index, keys): key is string => Boolean(key) && keys.indexOf(key) === index);
+let geminiKeyCursor = 0;
 
 type AiQuestionInput = {
   id: number;
@@ -47,6 +48,7 @@ type GeminiErrorResponse = {
 type ParsedGeminiError = {
   isQuotaError: boolean;
   message: string;
+  retryDelayMs: number | null;
 };
 
 function extractJsonPayload(text: string) {
@@ -101,6 +103,39 @@ function formatRetryDelay(retryDelay?: string) {
   return seconds === 1 ? ' Please try again in about 1 second.' : ` Please try again in about ${seconds} seconds.`;
 }
 
+function parseRetryDelayMs(retryDelay?: string) {
+  if (!retryDelay) {
+    return null;
+  }
+
+  const secondsMatch = retryDelay.match(/(\d+)/);
+  const seconds = secondsMatch ? Number(secondsMatch[1]) : Number.NaN;
+
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return null;
+  }
+
+  return seconds * 1000;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function getRotatedApiKeys() {
+  if (!GEMINI_API_KEYS.length) {
+    return [];
+  }
+
+  const normalizedCursor = geminiKeyCursor % GEMINI_API_KEYS.length;
+  return [
+    ...GEMINI_API_KEYS.slice(normalizedCursor),
+    ...GEMINI_API_KEYS.slice(0, normalizedCursor)
+  ];
+}
+
 function parseGeminiError(errorText: string): ParsedGeminiError {
   const fallbackMessage = 'AI answers are unavailable right now. Please try again.';
 
@@ -111,7 +146,8 @@ function parseGeminiError(errorText: string): ParsedGeminiError {
     if (!error) {
       return {
         isQuotaError: false,
-        message: fallbackMessage
+        message: fallbackMessage,
+        retryDelayMs: null
       };
     }
 
@@ -128,7 +164,8 @@ function parseGeminiError(errorText: string): ParsedGeminiError {
         isQuotaError: true,
         message: `AI answers are temporarily unavailable because the Gemini quota has been reached.${formatRetryDelay(
           retryDelay
-        )}`
+        )}`,
+        retryDelayMs: parseRetryDelayMs(retryDelay)
       };
     }
   } catch {
@@ -139,14 +176,16 @@ function parseGeminiError(errorText: string): ParsedGeminiError {
       return {
         isQuotaError: true,
         message:
-          'AI answers are temporarily unavailable because the Gemini quota has been reached. Please try again soon.'
+          'AI answers are temporarily unavailable because the Gemini quota has been reached. Please try again soon.',
+        retryDelayMs: null
       };
     }
   }
 
   return {
     isQuotaError: false,
-    message: fallbackMessage
+    message: fallbackMessage,
+    retryDelayMs: null
   };
 }
 
@@ -169,66 +208,90 @@ export async function generateAnswersWithGemini(questions: AiQuestionInput[]) {
   ].join('\n');
 
   let lastErrorMessage = 'Gemini request failed';
+  const maxQuotaRetryRounds = 2;
 
-  for (const apiKey of GEMINI_API_KEYS) {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-        GEMINI_MODEL
-      )}:generateContent?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: prompt }]
+  for (let round = 0; round < maxQuotaRetryRounds; round += 1) {
+    const rotatedApiKeys = getRotatedApiKeys();
+    let shortestRetryDelayMs: number | null = null;
+
+    for (let index = 0; index < rotatedApiKeys.length; index += 1) {
+      const apiKey = rotatedApiKeys[index];
+      const actualKeyIndex = GEMINI_API_KEYS.indexOf(apiKey);
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+          GEMINI_MODEL
+        )}:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: 'user',
+                parts: [{ text: prompt }]
+              }
+            ],
+            generationConfig: {
+              temperature: 0.2,
+              responseMimeType: 'application/json'
             }
-          ],
-          generationConfig: {
-            temperature: 0.2,
-            responseMimeType: 'application/json'
+          })
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        const parsedError = errorText
+          ? parseGeminiError(errorText)
+          : {
+              isQuotaError: false,
+              message: 'Gemini request failed',
+              retryDelayMs: null
+            };
+
+        lastErrorMessage = parsedError.message;
+
+        if (parsedError.isQuotaError) {
+          if (
+            parsedError.retryDelayMs !== null &&
+            (shortestRetryDelayMs === null || parsedError.retryDelayMs < shortestRetryDelayMs)
+          ) {
+            shortestRetryDelayMs = parsedError.retryDelayMs;
           }
-        })
-      }
-    );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      const parsedError = errorText
-        ? parseGeminiError(errorText)
-        : {
-            isQuotaError: false,
-            message: 'Gemini request failed'
-          };
+          geminiKeyCursor = actualKeyIndex >= 0 ? (actualKeyIndex + 1) % GEMINI_API_KEYS.length : 0;
+          continue;
+        }
 
-      lastErrorMessage = parsedError.message;
-
-      if (parsedError.isQuotaError) {
-        continue;
+        throw new Error(parsedError.message);
       }
 
-      throw new Error(parsedError.message);
+      const data = (await response.json()) as GeminiResponse;
+      const text = data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim();
+
+      if (!text) {
+        throw new Error('Gemini returned an empty response.');
+      }
+
+      let parsed: unknown;
+
+      try {
+        parsed = JSON.parse(extractJsonPayload(text));
+      } catch {
+        throw new Error('Gemini returned a response that was not valid JSON.');
+      }
+
+      geminiKeyCursor = actualKeyIndex >= 0 ? (actualKeyIndex + 1) % GEMINI_API_KEYS.length : 0;
+      return normalizeAiAnswers(parsed);
     }
 
-    const data = (await response.json()) as GeminiResponse;
-    const text = data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim();
-
-    if (!text) {
-      throw new Error('Gemini returned an empty response.');
+    if (shortestRetryDelayMs !== null && round < maxQuotaRetryRounds - 1) {
+      await delay(shortestRetryDelayMs);
+      continue;
     }
-
-    let parsed: unknown;
-
-    try {
-      parsed = JSON.parse(extractJsonPayload(text));
-    } catch {
-      throw new Error('Gemini returned a response that was not valid JSON.');
-    }
-
-    return normalizeAiAnswers(parsed);
   }
 
   throw new Error(lastErrorMessage);

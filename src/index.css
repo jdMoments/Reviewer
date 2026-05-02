@@ -1029,26 +1029,33 @@ a {
   min-height: calc(100vh - 72px);
   display: grid;
   gap: 28px;
-  padding: 28px;
-  border-radius: 32px;
-  background: rgba(255, 255, 255, 0.94);
+  padding: 30px 28px 40px;
+  border-radius: 36px;
+  background:
+    radial-gradient(circle at top left, rgba(215, 244, 237, 0.6), transparent 32%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 246, 0.95));
   border: 1px solid rgba(115, 131, 103, 0.08);
-  box-shadow: 0 18px 36px rgba(117, 125, 96, 0.15);
+  box-shadow:
+    0 24px 48px rgba(117, 125, 96, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
   backdrop-filter: none;
 }
 
 .practice-intro h1 {
-  margin: 18px 0 10px;
+  margin: 0 0 12px;
   font-family: 'Syne', sans-serif;
-  font-size: clamp(2.4rem, 4vw, 3.8rem);
+  font-size: clamp(3.6rem, 6vw, 4.8rem);
+  line-height: 0.92;
+  letter-spacing: -0.06em;
   color: #202531;
 }
 
 .practice-intro p {
   margin: 0;
-  max-width: 56ch;
+  max-width: 44rem;
   color: #8f97a4;
-  font-size: 1rem;
+  font-size: 1.06rem;
+  line-height: 1.45;
 }
 
 .practice-sync-note {
@@ -1691,7 +1698,7 @@ a {
   align-items: center;
   justify-content: flex-end;
   gap: 14px;
-  margin-top: 18px;
+  margin-top: 8px;
 }
 
 .practice-grid-arrow {
@@ -1740,8 +1747,10 @@ a {
 
 .practice-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 200px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 304px));
+  justify-content: start;
+  align-items: start;
+  gap: 20px;
 }
 
 .practice-intro-head {
@@ -1752,31 +1761,34 @@ a {
 }
 
 .practice-add-topic-button {
-  min-height: 52px;
-  padding: 0 22px;
+  min-height: 64px;
+  padding: 0 28px;
   border: 0;
-  border-radius: 18px;
+  border-radius: 22px;
   color: white;
   font-weight: 700;
+  font-size: 1rem;
   background: linear-gradient(135deg, #0b9a7a, #20c7aa);
-  box-shadow: 0 18px 26px rgba(11, 154, 122, 0.22);
+  box-shadow: 0 16px 30px rgba(11, 154, 122, 0.24);
 }
 
 .practice-tile {
   display: grid;
   gap: 18px;
-  min-height: 240px;
-  aspect-ratio: 1 / 1;
+  width: 100%;
+  min-height: 304px;
   align-content: space-between;
-  padding: 18px;
+  padding: 22px 22px 18px;
   text-align: left;
-  border: 0;
-  border-radius: 28px;
+  border: 1px solid rgba(182, 227, 217, 0.62);
+  border-radius: 30px;
   color: #202531;
-  background: linear-gradient(180deg, #ffffff, #f8fbf6);
+  background:
+    radial-gradient(circle at top left, rgba(229, 247, 241, 0.92), transparent 26%),
+    linear-gradient(180deg, #ffffff, #f9fcf8);
   box-shadow:
-    0 22px 38px rgba(117, 125, 96, 0.14),
-    0 8px 18px rgba(160, 171, 142, 0.1);
+    0 20px 40px rgba(117, 125, 96, 0.12),
+    0 8px 18px rgba(160, 171, 142, 0.08);
   transition:
     transform var(--transition-spring),
     box-shadow var(--transition-fast),
@@ -1784,17 +1796,17 @@ a {
 }
 
 .practice-tile:hover {
-  transform: translateY(-10px) scale(1.02);
+  transform: translateY(-8px);
   box-shadow:
-    0 28px 46px rgba(117, 125, 96, 0.2),
-    0 12px 24px rgba(160, 171, 142, 0.14);
+    0 28px 46px rgba(117, 125, 96, 0.16),
+    0 12px 24px rgba(160, 171, 142, 0.12);
 }
 
 .practice-tile.active {
   border: 1px solid rgba(11, 154, 122, 0.2);
   box-shadow:
-    0 28px 46px rgba(117, 125, 96, 0.2),
-    0 12px 24px rgba(11, 154, 122, 0.16);
+    0 28px 46px rgba(117, 125, 96, 0.16),
+    0 12px 24px rgba(11, 154, 122, 0.14);
 }
 
 .practice-tile-top,
@@ -1813,15 +1825,15 @@ a {
 }
 
 .practice-tile-icon {
-  width: 50px;
-  height: 50px;
-  border-radius: 16px;
+  width: 62px;
+  height: 62px;
+  border-radius: 18px;
   display: grid;
   place-items: center;
-  font-size: 1.12rem;
+  font-size: 1.2rem;
   font-weight: 800;
   font-family: 'Syne', sans-serif;
-  background: #eef8f3;
+  background: linear-gradient(180deg, #edf8f4, #e4f1ed);
   color: #0b9a7a;
 }
 
@@ -1841,14 +1853,15 @@ a {
 .practice-tile-copy h2 {
   margin: 0 0 10px;
   font-family: 'Syne', sans-serif;
-  font-size: 1.15rem;
-  line-height: 1.1;
+  font-size: 1.35rem;
+  line-height: 1;
+  letter-spacing: -0.04em;
 }
 
 .practice-tile-copy p {
   margin: 0;
   color: #8f97a4;
-  font-size: 0.92rem;
+  font-size: 0.94rem;
   line-height: 1.5;
 }
 
@@ -1859,14 +1872,14 @@ a {
 }
 
 .practice-arrow {
-  width: 38px;
-  height: 38px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   display: grid;
   place-items: center;
-  background: #f2f5ef;
+  background: rgba(240, 245, 239, 0.9);
   color: #687282;
-  font-size: 0.95rem;
+  font-size: 1.15rem;
 }
 
 .practice-summary {

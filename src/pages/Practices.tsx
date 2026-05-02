@@ -435,7 +435,7 @@ function Practices() {
     createPracticeTopic(1)
   ]);
   const [selectedTopicId, setSelectedTopicId] = useState(1);
-  const [expandedTopicId, setExpandedTopicId] = useState<number | null>(1);
+  const [expandedTopicId, setExpandedTopicId] = useState<number | null>(null);
   const [quizTitle, setQuizTitle] = useState('Weekly Mastery Check');
   const [quizCount, setQuizCount] = useState('5');
   const [selectedQuizId, setSelectedQuizId] = useState(1);
@@ -475,6 +475,7 @@ function Practices() {
   const [showResultReview, setShowResultReview] = useState(false);
   const [topicPage, setTopicPage] = useState(0);
   const [topicPageInput, setTopicPageInput] = useState('1');
+  const collectionRef = useRef<HTMLDivElement | null>(null);
 
   const selectedTopic = useMemo(
     () => practiceTopics.find((topic) => topic.id === selectedTopicId) ?? null,
@@ -530,6 +531,17 @@ function Practices() {
   useEffect(() => {
     setTopicPageInput(String(topicPage + 1));
   }, [topicPage]);
+
+  useEffect(() => {
+    if (!expandedTopicId || !collectionRef.current) {
+      return;
+    }
+
+    collectionRef.current.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start'
+    });
+  }, [expandedTopicId]);
 
   function commitTopicPage(nextValue: string) {
     const parsedValue = Number(nextValue);
@@ -657,13 +669,13 @@ function Practices() {
             )
           );
 
-          applyPracticeTopics(nextTopics, nextTopics[0]?.id ?? 1, nextTopics[0]?.id ?? 1);
+          applyPracticeTopics(nextTopics, nextTopics[0]?.id ?? 1, null);
           setPracticeStatus('Practice loaded from Supabase.');
           return;
         }
 
         const defaultTopics = [createPracticeTopic(1)];
-        applyPracticeTopics(defaultTopics, 1, 1);
+        applyPracticeTopics(defaultTopics, 1, null);
         await upsertPracticeWorkspace({
           studentAccountId: user.id,
           title: 'Weekly Mastery Check',
@@ -1723,7 +1735,7 @@ function Practices() {
         )}
 
         {expandedTopic && (
-          <div className="practice-collection page-enter">
+          <div className="practice-collection page-enter" ref={collectionRef}>
             <div className="practice-collection-head">
               <div>
                 <div className="practice-summary-label">Created Quizzes</div>
